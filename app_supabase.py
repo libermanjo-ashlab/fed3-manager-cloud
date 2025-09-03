@@ -1,4 +1,4 @@
-
+    
 import streamlit as st
 import pandas as pd
 from io import BytesIO
@@ -164,7 +164,29 @@ with st.sidebar:
             delete_all("devices")
             insert_rows("devices", dicts)
             log_action(actor, "bulk_upsert_devices", details=f"rows={len(dicts)}")
-            inv = sheets.get("Inventory") or sheets.get("To Test (Inventory)")
+            # safer: do not use "or" on DataFrames
+            inv = sheets.get("Inventory", None)
+            if inv is None:
+                inv = sheets.get("To Test (Inventory)", None)
+
+            if isinstance(inv, pd.DataFrame) and not inv.empty:
+                inv = inv.rename(columns={
+                 "Item": "item",
+                "Qty": "qty",
+                "inventory for fed3s": "item",
+                "unnamed: 1": "qty"
+                })
+                if "item" not in inv.columns or "qty" not in inv.columns:
+                    inv.columns = ["item", "qty"][:len(inv.columns)]
+    inv["item"] = inv["item"].apply(lambda x: None if pd.isna(x) or str(x).strip()=="" else str(x).strip())
+    inv["qty"] = pd.to_numeric(inv["qty"], errors="coerce").fillna(0)
+    inv = inv.dropna(subset=["item"])
+    delete_all("inventory")
+    insert_rows("inventory", df_to_dicts(inv))
+    log_action(actor, "bulk_upsert_inventory", details=f"rows={len(inv)}")
+else:
+    st.info("No Inventory sheet found; skipping inventory load.")
+
             if inv is not None:
                 inv = inv.rename(columns={"Item":"item","Qty":"qty","inventory for fed3s":"item","unnamed: 1":"qty"})
                 if "item" not in inv.columns or "qty" not in inv.columns:
