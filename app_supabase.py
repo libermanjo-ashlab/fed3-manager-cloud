@@ -172,20 +172,20 @@ with st.sidebar:
             if isinstance(inv, pd.DataFrame) and not inv.empty:
                 inv = inv.rename(columns={
                  "Item": "item",
-                "Qty": "qty",
-                "inventory for fed3s": "item",
-                "unnamed: 1": "qty"
+                 "Qty": "qty",
+                 "inventory for fed3s": "item",
+                 "unnamed: 1": "qty"
                 })
                 if "item" not in inv.columns or "qty" not in inv.columns:
                     inv.columns = ["item", "qty"][:len(inv.columns)]
-    inv["item"] = inv["item"].apply(lambda x: None if pd.isna(x) or str(x).strip()=="" else str(x).strip())
-    inv["qty"] = pd.to_numeric(inv["qty"], errors="coerce").fillna(0)
-    inv = inv.dropna(subset=["item"])
-    delete_all("inventory")
-    insert_rows("inventory", df_to_dicts(inv))
-    log_action(actor, "bulk_upsert_inventory", details=f"rows={len(inv)}")
-else:
-    st.info("No Inventory sheet found; skipping inventory load.")
+                inv["item"] = inv["item"].apply(lambda x: None if pd.isna(x) or str(x).strip()=="" else str(x).strip())
+                inv["qty"] = pd.to_numeric(inv["qty"], errors="coerce").fillna(0)
+                inv = inv.dropna(subset=["item"])
+                delete_all("inventory")
+                insert_rows("inventory", df_to_dicts(inv))
+                log_action(actor, "bulk_upsert_inventory", details=f"rows={len(inv)}")
+            else:
+                st.info("No Inventory sheet found; skipping inventory load.")
 
             if inv is not None:
                 inv = inv.rename(columns={"Item":"item","Qty":"qty","inventory for fed3s":"item","unnamed: 1":"qty"})
