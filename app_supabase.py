@@ -154,12 +154,12 @@ with st.sidebar:
     actor = st.text_input("Your name (for history)", value="lab-user")
 
     if auto:
-        last = st.session_state.get("last_refresh", 0.0)
         now = time.time()
+        last = st.session_state.get("last_refresh", 0.0)
         if now - last > 10:
             st.session_state["last_refresh"] = now
-            st.experimental_rerun()
-
+            st.rerun()
+            
     st.write("---")
     st.header("Admin")
     admin_enabled = False
@@ -259,6 +259,80 @@ with tab_overview:
             key="devices_editor",
         )
 
+        # --- Bulk edit selected rows ---
+with st.expander("Bulk edit selected rows"):
+    c1, c2, c3 = st.columns(3)
+    be_user = c1.selectbox("Set user", ["(no change)"] + USERS, index=0)
+    be_hs   = c2.selectbox("Set housing status", ["(no change)", "Working", "Broken", "Unknown"], index=0)
+    be_es   = c3.selectbox("Set electronics status", ["(no change)", "Working", "Broken", "Unknown"], index=0)
+
+    c4, c5, c6 = st.columns(3)
+    be_inuse = c4.selectbox("Set In use", ["(no change)", "True", "False"], index=0)
+    be_loc   = c5.text_input("Set location (leave blank = no change)")
+    be_issue = c6.selectbox("Set issue tag", ["(no change)"] + ISSUE_OPTIONS, index=0)
+
+    be_notes = st.text_input("Append to notes (added at end; leave blank = no change)")
+
+    if st.button("Apply to selected"):
+        # Which rows are checked?
+        selected_ids = [rid for rid, row in edited.iterrows() if bool(row.get("select"))]
+        if not selected_ids:
+            st.warning("Select at least one row with the checkbox column.")
+        else:
+            df_all = get_table_df("devices")
+            if df_all.empty:
+                st.warning("No devices in database.")
+            else:
+                # Work only on rows that are currently selected
+                target = df_all[df_all["id"].isin(selected_ids)]
+                updated = 0
+                for _, before in target.iterrows():
+                    updates = {}
+
+                    # apply field changes if requested
+                    if be_user != "(no change)":
+                        updates["user"] = normalize_user_val(be_user)
+                    if be_hs != "(no change)":
+                        updates["housing_status"] = None if be_hs == "Unknown" else be_hs
+                    if be_es != "(no change)":
+                        updates["electronics_status"] = None if be_es == "Unknown" else be_es
+                    if be_inuse != "(no change)":
+                        updates["in_use"] = (be_inuse == "True")
+                    if be_loc.strip() != "":
+                        updates["current_location"] = be_loc.strip()
+                    if be_issue != "(no change)":
+                        updates["issue_tags"] = be_issue
+                    if be_notes.strip():
+                        old_notes = before.get("notes") or ""
+                        sep = " | " if old_notes else ""
+                        updates["notes"] = f"{old_notes}{sep}{be_notes.strip()}"
+
+                    if not updates:
+                        continue
+
+                    # Recompute status_bucket using the would-be record
+                    probe = {**before.to_dict(), **updates}
+                    probe["user"] = normalize_user_val(probe.get("user"))
+                    probe["in_use"] = coerce_bool(probe.get("in_use"))
+                    updates["status_bucket"] = compute_bucket(probe)
+
+                    # Write to DB and log
+                    sb.table("devices").update(updates).eq("id", int(before["id"])).execute()
+                    log_action(
+                        actor, "bulk_edit",
+                        housing_id=probe.get("housing_id"),
+                        electronics_id=probe.get("electronics_id"),
+                        details=f"fields={list(updates.keys())}"
+                    )
+                    updated += 1
+
+                if updated == 0:
+                    st.info("Nothing to update.")
+                else:
+                    st.success(f"Updated {updated} row(s).")
+                    st.rerun()
+
+
         # Apply changes to selected rows
         colA, colB = st.columns([1,1])
         if colA.button("Save changes to selected"):
@@ -312,7 +386,7 @@ with tab_overview:
                 st.info("No selected rows had changes.")
             else:
                 st.success(f"Saved {changed_count} row(s).")
-                st.experimental_rerun()
+                st.rerun()
 
         if colB.button("Delete selected"):
             ids = [rid for rid, row in edited.iterrows() if bool(row.get("select"))]
@@ -328,7 +402,7 @@ with tab_overview:
                     log_action(actor, "delete_device", rec.get("housing_id"), rec.get("electronics_id"), details=f"id={rid}")
                 sb.table("devices").delete().in_("id", ids).execute()
                 st.success(f"Deleted {len(ids)} row(s).")
-                st.experimental_rerun()
+                st.rerun()
 
 # -------------------------------
 # Add Device
@@ -377,7 +451,7 @@ with tab_add:
             log_action(actor, "create_device", rec.get("housing_id"), rec.get("electronics_id"),
                        details=f"status={rec['status_bucket']}")
             st.success("Device created.")
-            st.experimental_rerun()
+            st.rerun()
 
 # -------------------------------
 # History
@@ -435,7 +509,7 @@ with tab_inventory:
                 sb.table("inventory").update({"qty": float(qty)}).eq("item", item).execute()
                 log_action("system", "inv_update", details=f"{item}={qty}")
             st.success("Inventory updated.")
-            st.experimental_rerun()
+            st.rerun()
     if cB.button("Delete"):
         if not item:
             st.warning("Enter an item name.")
@@ -443,7 +517,7 @@ with tab_inventory:
             sb.table("inventory").delete().eq("item", item).execute()
             log_action("system", "inv_delete", details=item)
             st.success("Deleted.")
-            st.experimental_rerun()
+            st.rerun()
 
 # -------------------------------
 # Admin (only if admin_enabled)
@@ -461,7 +535,7 @@ with tab_admin:
             sb.table("inventory").delete().neq("id",-1).execute()
             sb.table("devices").delete().neq("id",-1).execute()
             st.success("All data wiped.")
-            st.experimental_rerun()
+            st.rerun()
 
         # Export for sanity checks
         actions = get_table_df("actions")
