@@ -373,7 +373,10 @@ if admin_enabled:
             log_action(actor, "snapshot_import", r.get("housing_id"), r.get("electronics_id"), detail)
 
         # --- INVENTORY (optional) ---
-        inv = sheets.get("Inventory", None) or sheets.get("To Test (Inventory)", None)
+        inv = sheets.get("Inventory", None)
+        if inv is None or inv.empty:
+            inv = sheets.get("To Test (Inventory)", None)
+
         if isinstance(inv, pd.DataFrame) and not inv.empty:
             inv = inv.rename(columns={
                 "Item": "item", "Qty": "qty",
