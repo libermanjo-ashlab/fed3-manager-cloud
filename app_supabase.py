@@ -274,16 +274,74 @@ if admin_enabled:
         existing_df = get_table_df("devices")
         existing = dicts_indexed(df_to_dicts(existing_df)) if not existing_df.empty else {}
 
-        # 1) UPSERT all incoming rows
-        #    Prefer housing_id as conflict target, else electronics_id.
-        #    We do two passes to cover both keys.
-        to_upsert_h = [r for r in dicts if r.get("housing_id")]
-        to_upsert_e = [r for r in dicts if (not r.get("housing_id")) and r.get("electronics_id")]
+        def _norm_id(x):
+            if x is None:
+                return None
+            s = str(x).strip()
+            return None if s == "" or s.lower() in {"nan","none","null"} else s
 
-        if to_upsert_h:
-            sb.table("devices").upsert(to_upsert_h, on_conflict="housing_id").execute()
-        if to_upsert_e:
-            sb.table("devices").upsert(to_upsert_e, on_conflict="electronics_id").execute()
+        def _dedupe_by(rows, key):
+            # keep the LAST occurrence for each key
+            m = {}
+            keys = []
+            for r in rows:
+                k = _norm_id(r.get(key))
+                if k:
+                    r[key] = k
+                    m[k] = r
+                    keys.append(k)
+            dup_keys = [k for k, c in Counter(keys).items() if c > 1]
+            return list(m.values()), dup_keys
+
+        to_upsert_h_all = [r for r in dicts if _norm_id(r.get("housing_id"))]
+        to_upsert_e_all = [r for r in dicts if not _norm_id(r.get("housing_id")) and _norm_id(r.get("electronics_id"))]
+
+        to_upsert_h, dup_h = _dedupe_by(to_upsert_h_all, "housing_id")
+        to_upsert_e, dup_e = _dedupe_by(to_upsert_e_all, "electronics_id")
+
+        if dup_h or dup_e:
+            msg = []
+            if dup_h: msg.append("housing: " + ", ".join(dup_h[:5]) + ("…" if len(dup_h)>5 else ""))
+            if dup_e: msg.append("electronics: " + ", ".join(dup_e[:5]) + ("…" if len(dup_e)>5 else ""))
+            st.warning("Deduped duplicate IDs in upload — " + " | ".join(msg))
+
+        def safe_upsert(rows_h, rows_e):
+            """Try ON CONFLICT; fallback to manual merge if anything fails."""
+            try:
+                if rows_h:
+                    sb.table("devices").upsert(rows_h, on_conflict="housing_id").execute()
+                if rows_e:
+                    sb.table("devices").upsert(rows_e, on_conflict="electronics_id").execute()
+                return True
+            except Exception:
+                # Manual merge (update if exists, else insert)
+                cur = get_table_df("devices")
+                by_h = {}
+                by_e = {}
+                if not cur.empty:
+                    if "housing_id" in cur.columns and "id" in cur.columns:
+                        by_h = {str(x).strip(): int(i)
+                                for i, x in cur[["id","housing_id"]].dropna().itertuples(index=False, name=None)}
+                    if "electronics_id" in cur.columns and "id" in cur.columns:
+                        by_e = {str(x).strip(): int(i)
+                                for i, x in cur[["id","electronics_id"]].dropna().itertuples(index=False, name=None)}
+                for r in rows_h or []:
+                    hid = (r.get("housing_id") or "").strip()
+                    if hid and hid in by_h:
+                        sb.table("devices").update(r).eq("id", by_h[hid]).execute()
+                    else:
+                        sb.table("devices").insert(r).execute()
+                for r in rows_e or []:
+                    eid = (r.get("electronics_id") or "").strip()
+                    if eid and eid in by_e:
+                        sb.table("devices").update(r).eq("id", by_e[eid]).execute()
+                    else:
+                        sb.table("devices").insert(r).execute()
+                st.info("Performed manual merge (fallback).")
+                return False
+
+        used_on_conflict = safe_upsert(to_upsert_h, to_upsert_e)
+        # ---------------------------------------------------
 
         # 2) In Replace mode: delete rows that are in DB but not in workbook
         if load_mode.startswith("Replace"):
