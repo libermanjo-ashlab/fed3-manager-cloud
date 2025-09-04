@@ -4,6 +4,8 @@ from io import BytesIO
 from supabase import create_client, Client
 from postgrest.exceptions import APIError
 from datetime import datetime, date
+from collections import Counter
+
 
 
 st.set_page_config(page_title="FED3 Manager — Minimal (Admin + History + Search)", layout="wide")
