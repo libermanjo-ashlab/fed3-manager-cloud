@@ -1,12 +1,14 @@
-    
 import streamlit as st
 import pandas as pd
 from io import BytesIO
 from supabase import create_client, Client
 from postgrest.exceptions import APIError
 
-st.set_page_config(page_title="FED3 Manager", layout="wide")
+st.set_page_config(page_title="FED3 Manager — Minimal (Admin + History + Search)", layout="wide")
 
+# -------------------------------
+# Secrets / clients
+# -------------------------------
 @st.cache_resource
 def get_client() -> Client:
     url = st.secrets["SUPABASE_URL"]
@@ -15,6 +17,11 @@ def get_client() -> Client:
 
 sb = get_client()
 
+ADMIN_CODE = st.secrets.get("ADMIN_CODE", None)  # set in Cloud → Settings → Secrets
+
+# -------------------------------
+# Constants
+# -------------------------------
 STATUS_OPTIONS = ["Ready for Use", "In Use", "To Test", "Unclear"]
 USERS = ["Emma", "Sushma", "Taylor", "Keydy", "Unassigned"]
 ISSUE_OPTIONS = [
@@ -30,16 +37,19 @@ ISSUE_OPTIONS = [
     "General: Broken",
 ]
 
-# Only these columns are inserted into 'devices' (whitelist)
+# Only these columns go into devices (whitelist)
 DEVICE_FIELDS = [
-    "housing_id","housing_status",
-    "electronics_id","electronics_status",
-    "status_in_lab","status_with_mice",
-    "in_use","user",
-    "current_location","exp_start_date",
-    "notes","status_bucket","issue_tags"
+    "housing_id", "housing_status",
+    "electronics_id", "electronics_status",
+    "status_in_lab", "status_with_mice",
+    "in_use", "user",
+    "current_location", "exp_start_date",
+    "notes", "status_bucket", "issue_tags"
 ]
 
+# -------------------------------
+# Helpers
+# -------------------------------
 def norm(s):
     if s is None:
         return None
@@ -61,7 +71,7 @@ def compute_bucket(row: dict) -> str:
         return "To Test"
     if has_housing and (not has_board and not housing_working):
         return "To Test"
-    if has_board   and (not has_housing and not board_working):
+    if has_board and (not has_housing and not board_working):
         return "To Test"
     return "Unclear"
 
@@ -81,11 +91,7 @@ def df_to_dicts(df: pd.DataFrame):
     return out
 
 def filter_device_fields(rows):
-    filtered = []
-    for r in rows:
-        f = {k: r.get(k) for k in DEVICE_FIELDS if k in r}
-        filtered.append(f)
-    return filtered
+    return [{k: r.get(k) for k in DEVICE_FIELDS if k in r} for r in rows]
 
 def get_table_df(name: str) -> pd.DataFrame:
     data = sb.table(name).select("*").execute().data
@@ -127,54 +133,93 @@ def ensure_tables_exist():
         _ = sb.table("actions").select("id").limit(1).execute()
         return True
     except Exception:
-        st.error("Tables not found. Create them in Supabase with SQL_SCHEMA.sql or the patch provided.")
+        st.error("Tables not found. Run the SQL patch noted in the README/SQL file.")
         st.stop()
 
 ensure_tables_exist()
 
-st.title("FED3 Manager — Minimal (Hardened)")
+def maybe_hide_id(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    if not st.session_state.get("show_ids", False) and "id" in df.columns:
+        return df.drop(columns=["id"])
+    return df
+
+def get_history(housing_id: str | None = None, electronics_id: str | None = None) -> pd.DataFrame:
+    """Fetch action history for a device/board."""
+    q = sb.table("actions").select("*")
+    if housing_id:
+        q = q.eq("housing_id", housing_id)
+    if electronics_id:
+        q = q.eq("electronics_id", electronics_id)
+    data = q.order("ts", desc=True).execute().data
+    hist = pd.DataFrame(data) if data else pd.DataFrame()
+    # pretty order
+    cols = [c for c in ["ts","actor","action","details","housing_id","electronics_id","id"] if c in hist.columns]
+    return hist[cols] if not hist.empty else hist
+
+# -------------------------------
+# Sidebar (Admin mode + common)
+# -------------------------------
+st.title("FED3 Manager — Lab")
 
 with st.sidebar:
-    st.header("Setup / Admin")
+    st.header("Controls")
     st.checkbox("Show internal IDs", value=False, key="show_ids")
     actor = st.text_input("Your name (for log)", value="lab-user")
+
     st.write("---")
-    st.write("Initialize / refresh from workbook")
-    upl = st.file_uploader("Upload combined workbook (.xlsx)", type=["xlsx"])
-    if upl is not None and st.button("Load workbook into database"):
-        sheets = pd.read_excel(BytesIO(upl.read()), sheet_name=None, engine="openpyxl")
-        devices = sheets.get("Master List")
-        if devices is None:
-            st.error("Workbook must include a sheet named 'Master List'.")
-        else:
-            rename = {"status_(in_lab)":"status_in_lab", "status_(with_mice)":"status_with_mice"}
-            devices = devices.rename(columns=rename)
-            for c in ["in_use","user","housing_id","housing_status","electronics_id","electronics_status",
-                      "status_in_lab","status_with_mice","current_location","exp_start_date","notes","issue_tags"]:
-                if c not in devices.columns: devices[c] = None
-                devices[c] = devices[c].apply(norm)
-            def to_bool(x):
-                sx = str(x).lower()
-                return sx in ("1","yes","true","y")
-            devices["in_use"] = devices["in_use"].apply(to_bool)
-            dicts = df_to_dicts(devices)
-            for r in dicts:
-                r["status_bucket"] = compute_bucket(r)
-            dicts = filter_device_fields(dicts)  # whitelist
-            delete_all("devices")
-            insert_rows("devices", dicts)
-            log_action(actor, "bulk_upsert_devices", details=f"rows={len(dicts)}")
-            # safer: do not use "or" on DataFrames
+    st.subheader("Admin")
+    admin_enabled = False
+    if ADMIN_CODE:
+        code = st.text_input("Enter admin code", type="password")
+        admin_enabled = (code == ADMIN_CODE)
+        if not admin_enabled:
+            st.caption("Upload & destructive actions are hidden unless the code matches.")
+    else:
+        st.caption("ADMIN_CODE not set in secrets; admin features are disabled.")
+
+    # Admin-only: initialize/refresh from workbook
+    if admin_enabled:
+        st.write("Initialize / refresh from workbook")
+        upl = st.file_uploader("Upload combined workbook (.xlsx)", type=["xlsx"])
+        if upl is not None and st.button("Load workbook into database"):
+            sheets = pd.read_excel(BytesIO(upl.read()), sheet_name=None, engine="openpyxl")
+
+            # --- DEVICES ---
+            devices = sheets.get("Master List")
+            if devices is None:
+                st.error("Workbook must include a sheet named 'Master List'.")
+            else:
+                rename = {"status_(in_lab)": "status_in_lab", "status_(with_mice)": "status_with_mice"}
+                devices = devices.rename(columns=rename)
+                for c in ["in_use","user","housing_id","housing_status","electronics_id","electronics_status",
+                          "status_in_lab","status_with_mice","current_location","exp_start_date","notes","issue_tags"]:
+                    if c not in devices.columns:
+                        devices[c] = None
+                    devices[c] = devices[c].apply(norm)
+
+                def to_bool(x):
+                    sx = str(x).lower()
+                    return sx in ("1","yes","true","y")
+                devices["in_use"] = devices["in_use"].apply(to_bool)
+                dicts = df_to_dicts(devices)
+                for r in dicts:
+                    r["status_bucket"] = compute_bucket(r)
+                dicts = filter_device_fields(dicts)  # whitelist
+                delete_all("devices")
+                insert_rows("devices", dicts)
+                log_action(actor, "bulk_upsert_devices", details=f"rows={len(dicts)}")
+
+            # --- INVENTORY (optional) ---
             inv = sheets.get("Inventory", None)
             if inv is None:
                 inv = sheets.get("To Test (Inventory)", None)
 
             if isinstance(inv, pd.DataFrame) and not inv.empty:
                 inv = inv.rename(columns={
-                 "Item": "item",
-                 "Qty": "qty",
-                 "inventory for fed3s": "item",
-                 "unnamed: 1": "qty"
+                    "Item": "item", "Qty": "qty",
+                    "inventory for fed3s": "item", "unnamed: 1": "qty"
                 })
                 if "item" not in inv.columns or "qty" not in inv.columns:
                     inv.columns = ["item", "qty"][:len(inv.columns)]
@@ -185,69 +230,86 @@ with st.sidebar:
                 insert_rows("inventory", df_to_dicts(inv))
                 log_action(actor, "bulk_upsert_inventory", details=f"rows={len(inv)}")
             else:
-                st.info("No Inventory sheet found; skipping inventory load.")
+                st.info("No Inventory sheet found; skipped inventory load.")
 
-            if inv is not None:
-                inv = inv.rename(columns={"Item":"item","Qty":"qty","inventory for fed3s":"item","unnamed: 1":"qty"})
-                if "item" not in inv.columns or "qty" not in inv.columns:
-                    inv.columns = ["item","qty"][:len(inv.columns)]
-                inv["item"] = inv["item"].apply(norm)
-                inv["qty"] = pd.to_numeric(inv["qty"], errors="coerce").fillna(0)
-                inv = inv.dropna(subset=["item"])
-                delete_all("inventory")
-                insert_rows("inventory", df_to_dicts(inv))
-                log_action(actor, "bulk_upsert_inventory", details=f"rows={len(inv)}")
             st.success("Database initialized from workbook.")
 
-def maybe_hide_id(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty: 
-        return df
-    if not st.session_state.get("show_ids", False) and "id" in df.columns:
-        return df.drop(columns=["id"])
-    return df
-
-def counts_df():
-    df = get_table_df("devices")
-    if "status_bucket" not in df.columns:
-        df["status_bucket"] = pd.Series(dtype="object")
-    if df.empty:
-        return pd.DataFrame({"status_bucket": STATUS_OPTIONS, "n":[0,0,0,0]})
-    c = df.groupby("status_bucket").size().reset_index(name="n")
-    return c
-
-tab_dash, tab_request, tab_users, tab_to_test, tab_inventory, tab_admin = st.tabs(
-    ["Dashboard", "Request Devices", "My FEDs", "Mark & Repair", "Inventory", "Admin / Export"]
+# -------------------------------
+# Tabs
+# -------------------------------
+tab_devices, tab_request, tab_users, tab_to_test, tab_inventory, tab_admin = st.tabs(
+    ["Devices (Search)", "Request Devices", "My FEDs", "Mark & Repair", "Inventory", "Admin / Export"]
 )
 
-with tab_dash:
-    st.subheader("Overview")
-    c = counts_df()
-    def getc(name):
-        row = c[c["status_bucket"]==name]["n"]
-        return int(row.iloc[0]) if not row.empty else 0
-    st.write(f"Ready for Use: {getc('Ready for Use')}")
-    st.write(f"In Use: {getc('In Use')}")
-    st.write(f"To Test: {getc('To Test')}")
-    st.write(f"Unclear: {getc('Unclear')}")
-
+# -------------------------------
+# Devices (Searchable Overview)
+# -------------------------------
+with tab_devices:
+    st.subheader("Devices — filter & explore")
     df = get_table_df("devices")
+
+    # Build filter widgets
+    c1, c2, c3, c4, c5 = st.columns([1,1,1,1,2])
+    status_pick = c1.multiselect("Status", STATUS_OPTIONS, default=STATUS_OPTIONS)
+    user_vals = sorted([x for x in df.get("user", pd.Series([], dtype="object")).dropna().unique().tolist()] + ["Unassigned"])
+    user_pick = c2.multiselect("User", user_vals, default=user_vals)
+    issue_vals = sorted([x for x in df.get("issue_tags", pd.Series([], dtype="object")).dropna().unique().tolist()])
+    issue_pick = c3.multiselect("Issue", issue_vals, default=issue_vals)
+    id_search = c4.text_input("ID contains (housing/electronics)")
+    text_search = c5.text_input("Search notes/location")
+
+    # Apply filters safely
+    def series_str(s):  # normalize to string series for safe .str ops
+        return s.fillna("").astype(str)
+
     if "status_bucket" not in df.columns:
         df["status_bucket"] = pd.Series(dtype="object")
-    g = df[df["status_bucket"]=="In Use"].copy() if "status_bucket" in df.columns else pd.DataFrame()
-    if not g.empty and "user" in g.columns:
-        g["user"] = g["user"].fillna("Unassigned")
-        by_user = g.groupby("user").size().reset_index(name="n").sort_values("n", ascending=False)
-    else:
-        by_user = pd.DataFrame(columns=["user","n"])
-    st.write("In Use by User")
-    st.dataframe(by_user, width='stretch')
+    if "user" not in df.columns:
+        df["user"] = pd.Series(dtype="object")
+    if "issue_tags" not in df.columns:
+        df["issue_tags"] = pd.Series(dtype="object")
 
-    actions = get_table_df("actions")
-    if "ts" in actions.columns:
-        actions = actions.sort_values("ts", ascending=False)
-    st.write("Recent Actions")
-    st.dataframe(maybe_hide_id(actions.head(20)), width='stretch')
+    work = df.copy()
+    work = work[work["status_bucket"].isin(status_pick)] if status_pick else work
+    # treat NaN user as "Unassigned" for filter comparison
+    ucol = series_str(work["user"]).replace({"": "Unassigned"})
+    work = work[ucol.isin(user_pick)] if user_pick else work
+    if issue_pick:
+        w_issues = series_str(work["issue_tags"])
+        work = work[w_issues.isin(issue_pick) | (w_issues.eq("") & ("Unassigned" in issue_pick))]
+    if id_search:
+        hs = series_str(work.get("housing_id", pd.Series([], dtype="object")))
+        es = series_str(work.get("electronics_id", pd.Series([], dtype="object")))
+        mask = hs.str.contains(id_search, case=False, na=False) | es.str.contains(id_search, case=False, na=False)
+        work = work[mask]
+    if text_search:
+        notes = series_str(work.get("notes", pd.Series([], dtype="object")))
+        loc   = series_str(work.get("current_location", pd.Series([], dtype="object")))
+        mask = notes.str.contains(text_search, case=False, na=False) | loc.str.contains(text_search, case=False, na=False)
+        work = work[mask]
 
+    # Show table
+    show_cols = [c for c in ["id","housing_id","electronics_id","status_bucket","user","issue_tags",
+                             "current_location","exp_start_date","notes"] if c in work.columns]
+    st.dataframe(maybe_hide_id(work[show_cols] if show_cols else work), width='stretch')
+
+    # Quick history viewer
+    st.write("---")
+    left, right = st.columns([1,2])
+    with left:
+        sel_h = st.selectbox("View history for housing_id", [""] + sorted(series_str(df.get("housing_id", pd.Series([]))).unique().tolist()))
+        sel_e = st.selectbox("View history for electronics_id", [""] + sorted(series_str(df.get("electronics_id", pd.Series([]))).unique().tolist()))
+        st.caption("Pick either (or both).")
+    with right:
+        hist = get_history(sel_h or None, sel_e or None)
+        if hist.empty:
+            st.info("No history for the selected IDs.")
+        else:
+            st.dataframe(maybe_hide_id(hist), width='stretch')
+
+# -------------------------------
+# Request Devices
+# -------------------------------
 with tab_request:
     st.subheader("Request Ready Devices")
     who = st.selectbox("Researcher", USERS, index=0)
@@ -258,9 +320,16 @@ with tab_request:
     ready = df[df["status_bucket"]=="Ready for Use"].sort_values("id").head(int(n)) if "status_bucket" in df.columns else pd.DataFrame()
     avail = int((df["status_bucket"]=="Ready for Use").sum()) if "status_bucket" in df.columns else 0
     st.write(f"Ready available: {int(avail)}")
-    show_cols = [c for c in ["id","housing_id","electronics_id","current_location"] if c in ready.columns]
+    show_cols = [c for c in ["id","housing_id","electronics_id","current_location","notes"] if c in ready.columns]
     st.write("Preview")
     st.dataframe(maybe_hide_id(ready[show_cols] if show_cols else ready), width='stretch')
+
+    # Inline history: show for first item in preview
+    if not ready.empty:
+        r0 = ready.iloc[0]
+        st.write("History (first in preview):")
+        st.dataframe(maybe_hide_id(get_history(r0.get("housing_id"), r0.get("electronics_id"))), width='stretch')
+
     if st.button("Allocate"):
         if ready is None or ready.empty:
             st.warning("No devices available.")
@@ -272,6 +341,9 @@ with tab_request:
                 log_action("system", "allocate", r.get("housing_id"), r.get("electronics_id"), f"allocated to {who}")
             st.success(f"Allocated {len(ids)} device(s) to {who}.")
 
+# -------------------------------
+# My FEDs
+# -------------------------------
 with tab_users:
     st.subheader("My FEDs")
     who2 = st.selectbox("Researcher", USERS, index=0, key="user_view")
@@ -284,6 +356,8 @@ with tab_users:
         mine = df[(df["status_bucket"]=="In Use") & (df["user"]==who2)] if "user" in df.columns else pd.DataFrame()
     show_cols = [c for c in ["id","housing_id","electronics_id","current_location","exp_start_date","notes"] if c in mine.columns]
     st.dataframe(maybe_hide_id(mine[show_cols] if show_cols else mine), width='stretch')
+
+    # quick release
     choices = mine["housing_id"].dropna().tolist() if "housing_id" in mine.columns and not mine.empty else []
     sel = st.multiselect("Select housing_id(s) to release to Ready", choices)
     if st.button("Release to Ready"):
@@ -304,6 +378,9 @@ with tab_users:
                     log_action("system", "release", housing_id=hid, details="released to Ready")
                 st.success(f"Released {len(ids)} device(s) to Ready.")
 
+# -------------------------------
+# To Test / Repair
+# -------------------------------
 with tab_to_test:
     st.subheader("Mark Issue / Move to To Test")
     df = get_table_df("devices")
@@ -331,6 +408,7 @@ with tab_to_test:
                 update_rows("devices", [row["id"]], {"notes": new_notes, "issue_tags": issue})
             log_action("system", "mark_to_test", details=f"{id_mode}={pick} | {issue}")
             st.success("Updated.")
+
     st.write("Repair / Return to Ready")
     tofix = df[(df.get("status_bucket","")=="To Test") & df.get("housing_id").notna()] if not df.empty and "status_bucket" in df.columns and "housing_id" in df.columns else pd.DataFrame()
     pick2 = st.selectbox("housing_id to mark repaired", sorted(tofix["housing_id"].unique().tolist()) if not tofix.empty else [])
@@ -355,11 +433,15 @@ with tab_to_test:
             log_action("system", "repair", housing_id=pick2, details=f"housing_ok={housing_ok}, board_ok={board_ok}")
             st.success("Updated.")
 
+# -------------------------------
+# Inventory
+# -------------------------------
 with tab_inventory:
     st.subheader("Inventory")
     inv = get_table_df("inventory")
     inv_show = inv.drop(columns=["id"]) if (not st.session_state.get("show_ids", False) and "id" in inv.columns) else inv
     st.dataframe(inv_show, width='stretch')
+
     st.write("Add / update an item")
     item = st.text_input("Item")
     qty = st.number_input("Quantity", value=0.0, step=1.0)
@@ -384,8 +466,17 @@ with tab_inventory:
             log_action("system", "inv_delete", details=f"{item}")
             st.success("Deleted item.")
 
+# -------------------------------
+# Admin / Export
+# -------------------------------
 with tab_admin:
     st.subheader("Admin / Export")
+    actions = get_table_df("actions")
+    if "ts" in actions.columns:
+        actions = actions.sort_values("ts", ascending=False)
+    st.write("Recent Actions")
+    st.dataframe(maybe_hide_id(actions.head(50)), width='stretch')
+
     if st.button("Generate export"):
         ddf = get_table_df("devices")
         ivf = get_table_df("inventory")
@@ -397,7 +488,8 @@ with tab_admin:
         with pd.ExcelWriter(bio, engine="openpyxl") as writer:
             ddf.to_excel(writer, sheet_name="Master List", index=False)
             ivf.to_excel(writer, sheet_name="Inventory", index=False)
+            actions.to_excel(writer, sheet_name="Actions", index=False)
         bio.seek(0)
         st.download_button("Download Excel", data=bio.getvalue(), file_name="FED3_DB_Export.xlsx")
 
-st.caption("Minimal black & white UI — hardened to accept varied workbook columns and resilient to missing DB columns.")
+st.caption("Admin-only uploads; per-device history via 'actions'; searchable Devices overview.")
