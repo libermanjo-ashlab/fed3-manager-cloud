@@ -57,21 +57,19 @@ def norm(s):
     return s if s else None
 
 def compute_bucket(row: dict) -> str:
+    """Only mark In Use when explicit in_use==True.
+    Otherwise decide from part statuses."""
     in_use = bool(row.get("in_use") or False)
-    with_mice_working = str(row.get("status_with_mice") or "").lower() == "working"
-    housing_working = str(row.get("housing_status") or "").lower() == "working"
-    board_working   = str(row.get("electronics_status") or "").lower() == "working"
-    has_housing = bool(norm(row.get("housing_id")))
-    has_board   = bool(norm(row.get("electronics_id")))
-    if in_use or (norm(row.get("user")) and with_mice_working):
+    housing_working = str(row.get("housing_status") or "").strip().lower() == "working"
+    board_working   = str(row.get("electronics_status") or "").strip().lower() == "working"
+    has_housing = bool((row.get("housing_id") or "").strip())
+    has_board   = bool((row.get("electronics_id") or "").strip())
+
+    if in_use:
         return "In Use"
-    if housing_working and board_working and (not with_mice_working) and (not in_use):
+    if housing_working and board_working:
         return "Ready for Use"
-    if has_housing and has_board and (not housing_working or not board_working):
-        return "To Test"
-    if has_housing and (not has_board and not housing_working):
-        return "To Test"
-    if has_board and (not has_housing and not board_working):
+    if (has_housing or has_board) and (not housing_working or not board_working):
         return "To Test"
     return "Unclear"
 
@@ -146,17 +144,40 @@ def maybe_hide_id(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def get_history(housing_id: str | None = None, electronics_id: str | None = None) -> pd.DataFrame:
-    """Fetch action history for a device/board."""
+    """Timeline = current device snapshot + any actions (most recent first)."""
+    # Fetch actions
     q = sb.table("actions").select("*")
     if housing_id:
         q = q.eq("housing_id", housing_id)
     if electronics_id:
         q = q.eq("electronics_id", electronics_id)
-    data = q.order("ts", desc=True).execute().data
-    hist = pd.DataFrame(data) if data else pd.DataFrame()
-    # pretty order
+    acts = q.order("ts", desc=True).execute().data or []
+    hist = pd.DataFrame(acts)
+
+    # Current snapshot from devices
+    cur = []
+    if housing_id:
+        cur = sb.table("devices").select("*").eq("housing_id", housing_id).limit(1).execute().data or []
+    if not cur and electronics_id:
+        cur = sb.table("devices").select("*").eq("electronics_id", electronics_id).limit(1).execute().data or []
+
+    if cur:
+        d = cur[0]
+        snap = {
+            "ts": None,
+            "actor": "current",
+            "action": "current_state",
+            "details": f"status={d.get('status_bucket')}; user={d.get('user')}; "
+                       f"loc={d.get('current_location')}; notes={d.get('notes')}",
+            "housing_id": d.get("housing_id"),
+            "electronics_id": d.get("electronics_id"),
+            "id": None
+        }
+        hist = pd.concat([pd.DataFrame([snap]), hist], ignore_index=True) if not hist.empty else pd.DataFrame([snap])
+
     cols = [c for c in ["ts","actor","action","details","housing_id","electronics_id","id"] if c in hist.columns]
     return hist[cols] if not hist.empty else hist
+
 
 # -------------------------------
 # Sidebar (Admin mode + common)
@@ -210,7 +231,16 @@ with st.sidebar:
                 delete_all("devices")
                 insert_rows("devices", dicts)
                 log_action(actor, "bulk_upsert_devices", details=f"rows={len(dicts)}")
+                # Log a per-device snapshot so history lists something beyond the current state
+                for r in dicts:
+                    detail = (
+                        f"user={r.get('user')}, status={r.get('status_bucket')}, "
+                        f"loc={r.get('current_location')}, notes={r.get('notes')}"
+                    )
+                    log_action(actor, "snapshot_import", r.get("housing_id"), r.get("electronics_id"), detail)
 
+
+            
             # --- INVENTORY (optional) ---
             inv = sheets.get("Inventory", None)
             if inv is None:
