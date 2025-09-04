@@ -142,6 +142,28 @@ def coerce_bool(x):
     s = str(x).strip().lower()
     return s in ("1","true","yes","y")
 
+
+def clean_id(x):
+    if x is None:
+        return None
+    s = str(x).strip()
+    return s.upper() if s else None
+
+def normalize_device(rec: dict) -> dict:
+    out = rec.copy()
+    out["housing_id"] = clean_id(out.get("housing_id"))
+    out["electronics_id"] = clean_id(out.get("electronics_id"))
+    # normalize statuses to title-case or None
+    for k in ["housing_status", "electronics_status", "status_in_lab", "status_with_mice"]:
+        v = out.get(k)
+        out[k] = (str(v).strip().title() if v not in (None, "") else None)
+    # booleans
+    out["in_use"] = bool(out.get("in_use") or False)
+    # compute the auto bucket AFTER cleaning fields
+    out["status_bucket"] = compute_bucket(out)
+    return out
+
+
 # -------------------------------
 # Sidebar
 # -------------------------------
@@ -404,6 +426,27 @@ with st.expander("Bulk edit selected rows"):
                 st.success(f"Deleted {len(ids)} row(s).")
                 st.rerun()
 
+    rows_to_save = [...]  # the selected rows you collected
+    errors = []
+    for r in rows_to_save:
+        r = normalize_device(r)
+        try:
+            if r.get("housing_id"):
+                sb.table("devices").upsert(r, on_conflict="housing_id").execute()
+            elif r.get("electronics_id"):
+                sb.table("devices").upsert(r, on_conflict="electronics_id").execute()
+            else:
+                errors.append("Row missing both housing_id and electronics_id.")
+        except Exception as e:
+            errors.append(f"{r.get('housing_id') or r.get('electronics_id')}: {e}")
+    
+    if errors:
+        st.error("Some rows failed:\n" + "\n".join(errors))
+    else:
+        st.success("Saved.")
+    st.rerun()
+
+
 # -------------------------------
 # Add Device
 # -------------------------------
@@ -434,6 +477,22 @@ with tab_add:
             "in_use": bool(in_use),
             "exp_start_date": None
         }
+
+        rec = normalize_device(rec)
+        try:
+            if rec["housing_id"]:
+                sb.table("devices").upsert(rec, on_conflict="housing_id").execute()
+            elif rec["electronics_id"]:
+                sb.table("devices").upsert(rec, on_conflict="electronics_id").execute()
+            else:
+                st.warning("Provide at least one of housing_id or electronics_id.")
+                st.stop()
+            st.success("Device created.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Could not save device: {e}")
+
+        
         if exp_start:
             try:
                 rec["exp_start_date"] = pd.to_datetime(exp_start).to_pydatetime().isoformat()
