@@ -3,6 +3,8 @@ import pandas as pd
 from io import BytesIO
 from supabase import create_client, Client
 from postgrest.exceptions import APIError
+from datetime import datetime, date
+
 
 st.set_page_config(page_title="FED3 Manager — Minimal (Admin + History + Search)", layout="wide")
 
@@ -84,8 +86,13 @@ def df_to_dicts(df: pd.DataFrame):
         for k, v in r.items():
             if pd.isna(v):
                 o[k] = None
-            elif isinstance(v, (pd.Timestamp,)):
-                o[k] = v.isoformat()
+            elif isinstance(v, (pd.Timestamp, datetime, date)):
+                # ISO 8601 string; keep just date if no time info
+                try:
+                    # pandas Timestamp has .tz_convert sometimes; safest: to_pydatetime then isoformat()
+                    o[k] = pd.to_datetime(v).to_pydatetime().isoformat()
+                except Exception:
+                    o[k] = str(v)
             else:
                 o[k] = v
         out.append(o)
