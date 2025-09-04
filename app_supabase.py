@@ -54,7 +54,10 @@ def norm(s):
     if s is None:
         return None
     s = str(s).strip()
-    return s if s else None
+    if s == "" or s.lower() in {"nan", "none", "null"}:
+        return None
+    return s
+
 
 def compute_bucket(row: dict) -> str:
     """Only mark In Use when explicit in_use==True.
@@ -178,7 +181,32 @@ def get_history(housing_id: str | None = None, electronics_id: str | None = None
     cols = [c for c in ["ts","actor","action","details","housing_id","electronics_id","id"] if c in hist.columns]
     return hist[cols] if not hist.empty else hist
 
+# --- Key & compare helpers ---
+KEY_FIELDS = ["housing_id", "electronics_id"]
 
+def device_key(r: dict) -> str:
+    # prefer housing_id; fall back to electronics_id
+    h = (r.get("housing_id") or "").strip()
+    e = (r.get("electronics_id") or "").strip()
+    return f"H:{h}" if h else (f"E:{e}" if e else "")
+
+def clean_for_compare(r: dict) -> dict:
+    # normalize whitespace/case for comparison
+    out = {}
+    for k, v in r.items():
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            out[k] = None
+        elif isinstance(v, str):
+            out[k] = v.strip()
+        else:
+            out[k] = v
+    return out
+
+def dicts_indexed(dicts: list[dict]) -> dict:
+    return {device_key(d): clean_for_compare(d) for d in dicts if device_key(d)}
+
+    
+    
 # -------------------------------
 # Sidebar (Admin mode + common)
 # -------------------------------
@@ -200,45 +228,156 @@ with st.sidebar:
     else:
         st.caption("ADMIN_CODE not set in secrets; admin features are disabled.")
 
-    # Admin-only: initialize/refresh from workbook
-    if admin_enabled:
-        st.write("Initialize / refresh from workbook")
-        upl = st.file_uploader("Upload combined workbook (.xlsx)", type=["xlsx"])
-        if upl is not None and st.button("Load workbook into database"):
-            sheets = pd.read_excel(BytesIO(upl.read()), sheet_name=None, engine="openpyxl")
+# Admin-only: initialize/refresh from workbook
+if admin_enabled:
+    st.write("Initialize / refresh from workbook")
+    load_mode = st.radio("Load mode", ["Replace (match workbook)", "Merge (no deletes)"], horizontal=False)
+    upl = st.file_uploader("Upload combined workbook (.xlsx)", type=["xlsx"])
+    if upl is not None and st.button("Load workbook into database"):
+        sheets = pd.read_excel(BytesIO(upl.read()), sheet_name=None, engine="openpyxl")
 
-            # --- DEVICES ---
-            devices = sheets.get("Master List")
-            if devices is None:
-                st.error("Workbook must include a sheet named 'Master List'.")
-            else:
-                rename = {"status_(in_lab)": "status_in_lab", "status_(with_mice)": "status_with_mice"}
-                devices = devices.rename(columns=rename)
-                for c in ["in_use","user","housing_id","housing_status","electronics_id","electronics_status",
-                          "status_in_lab","status_with_mice","current_location","exp_start_date","notes","issue_tags"]:
-                    if c not in devices.columns:
-                        devices[c] = None
-                    devices[c] = devices[c].apply(norm)
+        # --- DEVICES ---
+        devices = sheets.get("Master List")
+        if devices is None:
+            st.error("Workbook must include a sheet named 'Master List'.")
+            st.stop()
 
-                def to_bool(x):
-                    sx = str(x).lower()
-                    return sx in ("1","yes","true","y")
-                devices["in_use"] = devices["in_use"].apply(to_bool)
-                dicts = df_to_dicts(devices)
-                for r in dicts:
-                    r["status_bucket"] = compute_bucket(r)
-                dicts = filter_device_fields(dicts)  # whitelist
-                delete_all("devices")
-                insert_rows("devices", dicts)
-                log_action(actor, "bulk_upsert_devices", details=f"rows={len(dicts)}")
-                # Log a per-device snapshot so history lists something beyond the current state
-                for r in dicts:
-                    detail = (
-                        f"user={r.get('user')}, status={r.get('status_bucket')}, "
-                        f"loc={r.get('current_location')}, notes={r.get('notes')}"
-                    )
-                    log_action(actor, "snapshot_import", r.get("housing_id"), r.get("electronics_id"), detail)
+        rename = {"status_(in_lab)": "status_in_lab", "status_(with_mice)": "status_with_mice"}
+        devices = devices.rename(columns=rename)
 
+        for c in ["in_use","user","housing_id","housing_status","electronics_id","electronics_status",
+                  "status_in_lab","status_with_mice","current_location","exp_start_date","notes","issue_tags"]:
+            if c not in devices.columns: devices[c] = None
+            # normalize strings
+            devices[c] = devices[c].apply(lambda x: None if (pd.isna(x) or str(x).strip()=="") else (str(x).strip() if isinstance(x,str) else x))
+
+        def to_bool(x): return str(x).lower() in ("1","yes","true","y")
+        devices["in_use"] = devices["in_use"].apply(to_bool)
+
+        dicts = df_to_dicts(devices)
+        # compute status_bucket with the stricter logic
+        for r in dicts:
+            r["status_bucket"] = compute_bucket(r)
+        dicts = filter_device_fields(dicts)
+
+        # INDEX BY KEY
+        incoming = dicts_indexed(dicts)
+
+        # fetch current DB
+        existing_df = get_table_df("devices")
+        existing = dicts_indexed(df_to_dicts(existing_df)) if not existing_df.empty else {}
+
+        # 1) UPSERT all incoming rows
+        #    Prefer housing_id as conflict target, else electronics_id.
+        #    We do two passes to cover both keys.
+        to_upsert_h = [r for r in dicts if r.get("housing_id")]
+        to_upsert_e = [r for r in dicts if (not r.get("housing_id")) and r.get("electronics_id")]
+
+        if to_upsert_h:
+            sb.table("devices").upsert(to_upsert_h, on_conflict="housing_id").execute()
+        if to_upsert_e:
+            sb.table("devices").upsert(to_upsert_e, on_conflict="electronics_id").execute()
+
+        # 2) In Replace mode: delete rows that are in DB but not in workbook
+        if load_mode.startswith("Replace"):
+            missing_keys = set(existing.keys()) - set(incoming.keys())
+            if missing_keys:
+                # map keys back to filters
+                to_del_h = [existing[k]["housing_id"] for k in missing_keys if existing[k].get("housing_id")]
+                to_del_e = [existing[k]["electronics_id"] for k in missing_keys if existing[k].get("electronics_id")]
+
+                # delete by ids found via those keys
+                if to_del_h:
+                    ids = sb.table("devices").select("id").in_("housing_id", to_del_h).execute().data
+                    if ids:
+                        sb.table("devices").delete().in_("id", [x["id"] for x in ids]).execute()
+
+                if to_del_e:
+                    ids = sb.table("devices").select("id").in_("electronics_id", to_del_e).execute().data
+                    if ids:
+                        sb.table("devices").delete().in_("id", [x["id"] for x in ids]).execute()
+
+        # Log snapshot_import entries (per-device)
+        for r in dicts:
+            detail = (
+                f"user={r.get('user')}, status={r.get('status_bucket')}, "
+                f"loc={r.get('current_location')}, notes={r.get('notes')}"
+            )
+            log_action(actor, "snapshot_import", r.get("housing_id"), r.get("electronics_id"), detail)
+
+        # --- INVENTORY (optional) ---
+        inv = sheets.get("Inventory", None) or sheets.get("To Test (Inventory)", None)
+        if isinstance(inv, pd.DataFrame) and not inv.empty:
+            inv = inv.rename(columns={
+                "Item": "item", "Qty": "qty",
+                "inventory for fed3s": "item", "unnamed: 1": "qty"
+            })
+            if "item" not in inv.columns or "qty" not in inv.columns:
+                inv.columns = ["item","qty"][:len(inv.columns)]
+            inv["item"] = inv["item"].apply(lambda x: None if (pd.isna(x) or str(x).strip()=="") else str(x).strip())
+            inv["qty"] = pd.to_numeric(inv["qty"], errors="coerce").fillna(0)
+            inv = inv.dropna(subset=["item"])
+            # Replace inventory to match workbook
+            sb.table("inventory").delete().neq("id",-1).execute()
+            insert_rows("inventory", df_to_dicts(inv))
+            log_action(actor, "bulk_upsert_inventory", details=f"rows={len(inv)}")
+
+        st.success(f"Loaded {len(dicts)} device rows ({'replace' if load_mode.startswith('Replace') else 'merge'} mode).")
+
+        st.write("---")
+        st.subheader("Add / Remove Device")
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            st.write("Add / Update")
+            ah = st.text_input("Housing ID (e.g., H36)", key="add_h")
+            ae = st.text_input("Electronics ID (e.g., E36)", key="add_e")
+            ahs = st.selectbox("Housing status", ["Working","Broken","Unknown"], index=0, key="add_hs")
+            aes = st.selectbox("Electronics status", ["Working","Broken","Unknown"], index=0, key="add_es")
+            auser = st.selectbox("User", USERS, index=USERS.index("Unassigned"), key="add_user")
+            ainuse = st.checkbox("In use", value=False, key="add_inuse")
+            aloc = st.text_input("Location", key="add_loc")
+            anotes = st.text_input("Notes", key="add_notes")
+        
+            if st.button("Save device"):
+                rec = {
+                    "housing_id": ah or None,
+                    "electronics_id": ae or None,
+                    "housing_status": ahs if ahs!="Unknown" else None,
+                    "electronics_status": aes if aes!="Unknown" else None,
+                    "user": None if auser=="Unassigned" else auser,
+                    "in_use": bool(ainuse),
+                    "current_location": aloc or None,
+                    "notes": anotes or None,
+                }
+                rec["status_bucket"] = compute_bucket(rec)
+                # upsert by housing_id or electronics_id
+                if rec["housing_id"]:
+                    sb.table("devices").upsert(rec, on_conflict="housing_id").execute()
+                elif rec["electronics_id"]:
+                    sb.table("devices").upsert(rec, on_conflict="electronics_id").execute()
+                else:
+                    st.warning("Provide at least one of housing_id or electronics_id.")
+                log_action(actor, "admin_save_device", rec.get("housing_id"), rec.get("electronics_id"),
+                           f"status={rec['status_bucket']}; user={rec.get('user')}; loc={rec.get('current_location')}")
+                st.success("Saved.")
+        
+        with c2:
+            st.write("Remove")
+            rm_mode = st.radio("Identify by", ["housing_id","electronics_id"], horizontal=True)
+            df_all = get_table_df("devices")
+            opts = sorted(df_all.get(rm_mode, pd.Series([], dtype="object")).dropna().unique().tolist())
+            rid = st.selectbox(rm_mode, [""] + opts)
+            if st.button("Delete device"):
+                if not rid:
+                    st.warning("Pick an ID to delete.")
+                else:
+                    sb.table("devices").delete().eq(rm_mode, rid).execute()
+                    log_action(actor, "admin_delete_device",
+                               housing_id=rid if rm_mode=="housing_id" else None,
+                               electronics_id=rid if rm_mode=="electronics_id" else None,
+                               details="deleted from Admin")
+                    st.success("Deleted.")
 
             
             # --- INVENTORY (optional) ---
@@ -522,4 +661,4 @@ with tab_admin:
         bio.seek(0)
         st.download_button("Download Excel", data=bio.getvalue(), file_name="FED3_DB_Export.xlsx")
 
-st.caption("Admin-only uploads; per-device history via 'actions'; searchable Devices overview.")
+st.caption("Refer to READ ME file for use guide.")
