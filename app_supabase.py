@@ -454,46 +454,46 @@ with tab_add:
         exp_start = st.date_input("Experiment start (optional)", value=None)
 
     if st.button("Create device"):
-    # Convert date picker first
-    exp_iso = None
-    if exp_start:
+        # Convert date picker first
+        exp_iso = None
+        if exp_start:
+            try:
+                exp_iso = pd.to_datetime(exp_start).to_pydatetime().isoformat()
+            except Exception:
+                exp_iso = None
+    
+        rec = {
+            "housing_id": housing_id or None,
+            "electronics_id": electronics_id or None,
+            "housing_status": housing_status if housing_status != "Unknown" else None,
+            "electronics_status": electronics_status if electronics_status != "Unknown" else None,
+            "current_location": current_location or None,
+            "notes": notes or None,
+            "user": normalize_user_val(user_val),
+            "in_use": bool(in_use),
+            "exp_start_date": exp_iso,
+        }
+    
+        rec = normalize_device(rec)
+    
         try:
-            exp_iso = pd.to_datetime(exp_start).to_pydatetime().isoformat()
-        except Exception:
-            exp_iso = None
-
-    rec = {
-        "housing_id": housing_id or None,
-        "electronics_id": electronics_id or None,
-        "housing_status": housing_status if housing_status != "Unknown" else None,
-        "electronics_status": electronics_status if electronics_status != "Unknown" else None,
-        "current_location": current_location or None,
-        "notes": notes or None,
-        "user": normalize_user_val(user_val),
-        "in_use": bool(in_use),
-        "exp_start_date": exp_iso,
-    }
-
-    rec = normalize_device(rec)
-
-    try:
-        if rec["housing_id"]:
-            sb.table("devices").upsert(rec, on_conflict="housing_id").execute()
-        elif rec["electronics_id"]:
-            sb.table("devices").upsert(rec, on_conflict="electronics_id").execute()
-        else:
-            st.warning("Provide at least one of housing_id or electronics_id.")
-            st.stop()
-
-        log_action(
-            actor, "create_device",
-            rec.get("housing_id"), rec.get("electronics_id"),
-            details=f"status={rec['status_bucket']}"
-        )
-        st.success("Device created.")
-        st.rerun()
-    except Exception as e:
-        st.error(f"Could not save device: {e}")
+            if rec["housing_id"]:
+                sb.table("devices").upsert(rec, on_conflict="housing_id").execute()
+            elif rec["electronics_id"]:
+                sb.table("devices").upsert(rec, on_conflict="electronics_id").execute()
+            else:
+                st.warning("Provide at least one of housing_id or electronics_id.")
+                st.stop()
+    
+            log_action(
+                actor, "create_device",
+                rec.get("housing_id"), rec.get("electronics_id"),
+                details=f"status={rec['status_bucket']}"
+            )
+            st.success("Device created.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Could not save device: {e}")
 
 
         
