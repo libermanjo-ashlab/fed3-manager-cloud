@@ -300,18 +300,19 @@ with tab_overview:
         # --- Bulk edit selected rows ---
 with st.expander("Bulk edit selected rows"):
     c1, c2, c3 = st.columns(3)
-    be_user = c1.selectbox("Set user", ["(no change)"] + USERS, index=0)
-    be_hs   = c2.selectbox("Set housing status", ["(no change)", "Working", "Broken", "Unknown"], index=0)
-    be_es   = c3.selectbox("Set electronics status", ["(no change)", "Working", "Broken", "Unknown"], index=0)
+    be_user = c1.selectbox("Set user", ["(no change)"] + USERS, index=0, key="overview_be_user")
+    be_hs   = c2.selectbox("Set housing status", ["(no change)", "Working", "Broken", "Unknown"], index=0, key="overview_be_hs")
+    be_es   = c3.selectbox("Set electronics status", ["(no change)", "Working", "Broken", "Unknown"], index=0, key="overview_be_es")
 
     c4, c5, c6 = st.columns(3)
-    be_inuse = c4.selectbox("Set In use", ["(no change)", "True", "False"], index=0)
-    be_loc   = c5.text_input("Set location (leave blank = no change)")
-    be_issue = c6.selectbox("Set issue tag", ["(no change)"] + ISSUE_OPTIONS, index=0)
+    be_inuse = c4.selectbox("Set In use", ["(no change)", "True", "False"], index=0, key="overview_be_inuse")
+    be_loc   = c5.text_input("Set location (leave blank = no change)", key="overview_be_loc")
+    be_issue = c6.selectbox("Set issue tag", ["(no change)"] + ISSUE_OPTIONS, index=0, key="overview_be_issue")
 
-    be_notes = st.text_input("Append to notes (added at end; leave blank = no change)")
+    be_notes = st.text_input("Append to notes (added at end; leave blank = no change)", key="overview_be_notes")
 
-    if st.button("Apply to selected"):
+    if st.button("Apply to selected", key="overview_apply_selected"):
+        
         # Which rows are checked?
         selected_ids = [rid for rid, row in edited.iterrows() if bool(row.get("select"))]
         if not selected_ids:
@@ -492,13 +493,12 @@ with tab_mine:
                 "exp_start_date": st.column_config.DateColumn("Exp start", format="YYYY-MM-DD"),
             }
 
-                        # Coerce dtypes the editor expects
-            if "in_use" in view.columns:
-                view["in_use"] = view["in_use"].fillna(False).astype(bool)
+           # Coerce dtypes the editor expects (use view_mine, not view)
+            if "in_use" in view_mine.columns:
+                view_mine["in_use"] = view_mine["in_use"].fillna(False).astype(bool)
             
-            if "exp_start_date" in view.columns:
-                # convert strings/None to datetime64[ns] (NaT on bad values)
-                view["exp_start_date"] = pd.to_datetime(view["exp_start_date"], errors="coerce")
+            if "exp_start_date" in view_mine.columns:
+                view_mine["exp_start_date"] = pd.to_datetime(view_mine["exp_start_date"], errors="coerce")
 
             
             edited_mine = st.data_editor(
@@ -507,12 +507,12 @@ with tab_mine:
                 column_config=colcfg_mine,
                 width="stretch",
                 num_rows="fixed",
-                key="mine_editor",
+                key="devices_editor_mine",   # <-- unique
             )
 
             # ---- Save inline edits for selected rows
             colA, colB = st.columns([1,1])
-            if colA.button("Save changes to selected (My FEDs)"):
+            if colA.button("Save changes to selected (My FEDs)", key="myfeds_save_selected"):
                 changed_count = 0
                 for rid, row in edited_mine.iterrows():
                     if not bool(row.get("select")):
@@ -562,12 +562,12 @@ with tab_mine:
             # ---- Request maintenance for selected
             with st.expander("Request maintenance for selected"):
                 c1, c2, c3 = st.columns(3)
-                issue_sel = c1.selectbox("Issue", ISSUE_OPTIONS)
-                set_hs = c2.selectbox("Set housing status", ["(no change)", "Working", "Broken", "Unknown"], index=0)
-                set_es = c3.selectbox("Set electronics status", ["(no change)", "Working", "Broken", "Unknown"], index=0)
-                note_add = st.text_input("Maintenance note (append)")
-
-                if st.button("Submit maintenance request"):
+                issue_sel = c1.selectbox("Issue", ISSUE_OPTIONS, key="myfeds_issue")
+                set_hs    = c2.selectbox("Set housing status", ["(no change)", "Working", "Broken", "Unknown"], index=0, key="myfeds_set_hs")
+                set_es    = c3.selectbox("Set electronics status", ["(no change)", "Working", "Broken", "Unknown"], index=0, key="myfeds_set_es")
+                note_add  = st.text_input("Maintenance note (append)", key="myfeds_note_add")
+            
+                if st.button("Submit maintenance request", key="myfeds_submit_maint"):
                     ids = [rid for rid, row in edited_mine.iterrows() if bool(row.get("select"))]
                     if not ids:
                         st.warning("Select at least one row above.")
@@ -721,7 +721,7 @@ with tab_add:
             else:
                 st.warning("Provide at least one of housing_id or electronics_id.")
                 st.stop()
-    
+
             log_action(
                 actor, "create_device",
                 rec.get("housing_id"), rec.get("electronics_id"),
@@ -731,27 +731,6 @@ with tab_add:
             st.rerun()
         except Exception as e:
             st.error(f"Could not save device: {e}")
-
-
-        
-        if exp_start:
-            try:
-                rec["exp_start_date"] = pd.to_datetime(exp_start).to_pydatetime().isoformat()
-            except Exception:
-                rec["exp_start_date"] = None
-
-        rec["status_bucket"] = compute_bucket(rec)
-
-        # Insert (unique constraints on housing_id / electronics_id handle duplicates)
-        try:
-            sb.table("devices").insert(rec).execute()
-        except APIError as e:
-            st.error(f"Insert failed: {getattr(e,'message',e)}")
-        else:
-            log_action(actor, "create_device", rec.get("housing_id"), rec.get("electronics_id"),
-                       details=f"status={rec['status_bucket']}")
-            st.success("Device created.")
-            st.rerun()
 
 # -------------------------------
 # History
