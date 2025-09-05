@@ -271,14 +271,22 @@ with tab_overview:
 
         # Configure editor
         colcfg = {
-            "select": st.column_config.CheckboxColumn("Select"),
-            "in_use": st.column_config.CheckboxColumn("In use"),
-            "user": st.column_config.SelectboxColumn("User", options=USERS),
-            "housing_status": st.column_config.SelectboxColumn("Housing status", options=["Working","Broken","Unknown"]),
-            "electronics_status": st.column_config.SelectboxColumn("Electronics status", options=["Working","Broken","Unknown"]),
-            "status_bucket": st.column_config.SelectboxColumn("Status (auto)", options=STATUS_OPTIONS, disabled=True),
-            "exp_start_date": st.column_config.DatetimeColumn("Exp start"),
-        }
+                "select": st.column_config.CheckboxColumn("Select"),
+                "in_use": st.column_config.CheckboxColumn("In use"),
+                "user": st.column_config.SelectboxColumn("User", options=USERS),
+                "housing_status": st.column_config.SelectboxColumn("Housing status", options=["Working","Broken","Unknown"]),
+                "electronics_status": st.column_config.SelectboxColumn("Electronics status", options=["Working","Broken","Unknown"]),
+                "status_bucket": st.column_config.SelectboxColumn("Status (auto)", options=STATUS_OPTIONS, disabled=True),
+                # was DatetimeColumn → use DateColumn
+                "exp_start_date": st.column_config.DateColumn("Exp start", format="YYYY-MM-DD"),
+            }
+# Coerce dtypes the editor expects
+if "in_use" in view.columns:
+    view["in_use"] = view["in_use"].fillna(False).astype(bool)
+
+if "exp_start_date" in view.columns:
+    # convert strings/None to datetime64[ns] (NaT on bad values)
+    view["exp_start_date"] = pd.to_datetime(view["exp_start_date"], errors="coerce")
 
         edited = st.data_editor(
             view,
@@ -480,9 +488,19 @@ with tab_mine:
                 "housing_status": st.column_config.SelectboxColumn("Housing status", options=["Working","Broken","Unknown"]),
                 "electronics_status": st.column_config.SelectboxColumn("Electronics status", options=["Working","Broken","Unknown"]),
                 "status_bucket": st.column_config.SelectboxColumn("Status (auto)", options=STATUS_OPTIONS, disabled=True),
-                "exp_start_date": st.column_config.DatetimeColumn("Exp start"),
+                # was DatetimeColumn → use DateColumn
+                "exp_start_date": st.column_config.DateColumn("Exp start", format="YYYY-MM-DD"),
             }
 
+            # Coerce dtypes the editor expects
+if "in_use" in view.columns:
+    view["in_use"] = view["in_use"].fillna(False).astype(bool)
+
+if "exp_start_date" in view.columns:
+    # convert strings/None to datetime64[ns] (NaT on bad values)
+    view["exp_start_date"] = pd.to_datetime(view["exp_start_date"], errors="coerce")
+
+            
             edited_mine = st.data_editor(
                 view_mine,
                 hide_index=not st.session_state.get("show_ids", False),
