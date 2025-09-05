@@ -280,13 +280,13 @@ with tab_overview:
                 # was DatetimeColumn → use DateColumn
                 "exp_start_date": st.column_config.DateColumn("Exp start", format="YYYY-MM-DD"),
             }
-# Coerce dtypes the editor expects
-if "in_use" in view.columns:
-    view["in_use"] = view["in_use"].fillna(False).astype(bool)
-
-if "exp_start_date" in view.columns:
-    # convert strings/None to datetime64[ns] (NaT on bad values)
-    view["exp_start_date"] = pd.to_datetime(view["exp_start_date"], errors="coerce")
+        # Coerce dtypes the editor expects
+        if "in_use" in view.columns:
+            view["in_use"] = view["in_use"].fillna(False).astype(bool)
+        
+        if "exp_start_date" in view.columns:
+            # convert strings/None to datetime64[ns] (NaT on bad values)
+            view["exp_start_date"] = pd.to_datetime(view["exp_start_date"], errors="coerce")
 
         edited = st.data_editor(
             view,
@@ -492,13 +492,13 @@ with tab_mine:
                 "exp_start_date": st.column_config.DateColumn("Exp start", format="YYYY-MM-DD"),
             }
 
-            # Coerce dtypes the editor expects
-if "in_use" in view.columns:
-    view["in_use"] = view["in_use"].fillna(False).astype(bool)
-
-if "exp_start_date" in view.columns:
-    # convert strings/None to datetime64[ns] (NaT on bad values)
-    view["exp_start_date"] = pd.to_datetime(view["exp_start_date"], errors="coerce")
+                        # Coerce dtypes the editor expects
+            if "in_use" in view.columns:
+                view["in_use"] = view["in_use"].fillna(False).astype(bool)
+            
+            if "exp_start_date" in view.columns:
+                # convert strings/None to datetime64[ns] (NaT on bad values)
+                view["exp_start_date"] = pd.to_datetime(view["exp_start_date"], errors="coerce")
 
             
             edited_mine = st.data_editor(
