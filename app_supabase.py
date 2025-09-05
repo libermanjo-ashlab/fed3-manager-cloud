@@ -204,8 +204,8 @@ with st.sidebar:
 # -------------------------------
 # Tabs
 # -------------------------------
-tab_overview, tab_add, tab_history, tab_inventory, tab_admin = st.tabs(
-    ["Overview (Search & Edit)", "Add Device", "History", "Inventory", "Admin"]
+tab_overview, tab_mine, tab_add, tab_history, tab_inventory, tab_admin = st.tabs(
+    ["Overview (Search & Edit)", "My FEDs", "Add Device", "History", "Inventory", "Admin"]
 )
 
 # -------------------------------
@@ -434,6 +434,225 @@ with st.expander("Bulk edit selected rows"):
                 st.success(f"Deleted {len(ids)} row(s).")
                 st.rerun()
 
+# -------------------------------
+# My FEDs (researcher view)
+# -------------------------------
+with tab_mine:
+    st.subheader("My FEDs")
+
+    # Pick researcher
+    me = st.selectbox("Researcher", USERS, index=USERS.index("Emma") if "Emma" in USERS else 0, key="mine_user")
+    me_norm = normalize_user_val(me)  # None if Unassigned, else string
+
+    df_all = get_table_df("devices")
+    if df_all.empty:
+        st.info("No devices yet.")
+    else:
+        # Ensure columns exist
+        for c in ["status_bucket","user","issue_tags","housing_status","electronics_status",
+                  "current_location","exp_start_date","notes","in_use","housing_id","electronics_id"]:
+            if c not in df_all.columns:
+                df_all[c] = pd.Series(dtype="object")
+
+        # --- My currently allocated devices (In Use + user==me) ---
+        mine_mask = (df_all["status_bucket"] == "In Use") & (df_all["user"] == (me_norm if me_norm else None))
+        mine = df_all[mine_mask].copy()
+
+        st.markdown("#### Your current FEDs")
+        if mine.empty:
+            st.caption("You don’t have any allocated FEDs yet.")
+        else:
+            # Build editor like Overview
+            cols = [
+                "housing_id","electronics_id","status_bucket","user","issue_tags",
+                "housing_status","electronics_status","in_use",
+                "current_location","exp_start_date","notes"
+            ]
+            cols = [c for c in cols if c in mine.columns]
+            view_mine = mine[["id"] + cols].copy()
+            view_mine.insert(0, "select", False)
+            view_mine = view_mine.set_index("id", drop=True)
+
+            colcfg_mine = {
+                "select": st.column_config.CheckboxColumn("Select"),
+                "in_use": st.column_config.CheckboxColumn("In use"),
+                "user": st.column_config.SelectboxColumn("User", options=USERS),
+                "housing_status": st.column_config.SelectboxColumn("Housing status", options=["Working","Broken","Unknown"]),
+                "electronics_status": st.column_config.SelectboxColumn("Electronics status", options=["Working","Broken","Unknown"]),
+                "status_bucket": st.column_config.SelectboxColumn("Status (auto)", options=STATUS_OPTIONS, disabled=True),
+                "exp_start_date": st.column_config.DatetimeColumn("Exp start"),
+            }
+
+            edited_mine = st.data_editor(
+                view_mine,
+                hide_index=not st.session_state.get("show_ids", False),
+                column_config=colcfg_mine,
+                width="stretch",
+                num_rows="fixed",
+                key="mine_editor",
+            )
+
+            # ---- Save inline edits for selected rows
+            colA, colB = st.columns([1,1])
+            if colA.button("Save changes to selected (My FEDs)"):
+                changed_count = 0
+                for rid, row in edited_mine.iterrows():
+                    if not bool(row.get("select")):
+                        continue
+                    before = view_mine.loc[rid]
+                    updates = {}
+                    for c in DEVICE_FIELDS_EDITABLE:
+                        if c not in edited_mine.columns:
+                            continue
+                        newv = row.get(c)
+                        oldv = before.get(c)
+                        if c == "in_use":
+                            newv = coerce_bool(newv); oldv = coerce_bool(oldv)
+                        if c == "user":
+                            newv = normalize_user_val(newv); oldv = normalize_user_val(oldv)
+                        if c == "exp_start_date" and pd.notna(newv):
+                            try:
+                                newv = pd.to_datetime(newv).to_pydatetime().isoformat()
+                            except Exception:
+                                newv = str(newv)
+
+                        # detect change
+                        if (pd.isna(oldv) and pd.notna(newv)) or (pd.isna(newv) and pd.notna(oldv)) or (newv != oldv):
+                            updates[c] = newv if (newv is not None and not (isinstance(newv, float) and pd.isna(newv))) else None
+
+                    if updates:
+                        probe = {**before.to_dict(), **updates}
+                        probe["user"] = normalize_user_val(probe.get("user"))
+                        probe["in_use"] = coerce_bool(probe.get("in_use"))
+                        updates["status_bucket"] = compute_bucket(probe)
+
+                        sb.table("devices").update(updates).eq("id", rid).execute()
+                        changed_count += 1
+                        log_action(
+                            actor, "inline_update_mine",
+                            housing_id=probe.get("housing_id"),
+                            electronics_id=probe.get("electronics_id"),
+                            details=f"updated fields: {', '.join(updates.keys())}"
+                        )
+
+                if changed_count == 0:
+                    st.info("No selected rows had changes.")
+                else:
+                    st.success(f"Saved {changed_count} row(s).")
+                    st.rerun()
+
+            # ---- Request maintenance for selected
+            with st.expander("Request maintenance for selected"):
+                c1, c2, c3 = st.columns(3)
+                issue_sel = c1.selectbox("Issue", ISSUE_OPTIONS)
+                set_hs = c2.selectbox("Set housing status", ["(no change)", "Working", "Broken", "Unknown"], index=0)
+                set_es = c3.selectbox("Set electronics status", ["(no change)", "Working", "Broken", "Unknown"], index=0)
+                note_add = st.text_input("Maintenance note (append)")
+
+                if st.button("Submit maintenance request"):
+                    ids = [rid for rid, row in edited_mine.iterrows() if bool(row.get("select"))]
+                    if not ids:
+                        st.warning("Select at least one row above.")
+                    else:
+                        updated = 0
+                        for rid in ids:
+                            row = mine[mine["id"] == rid].iloc[0]
+                            up = {
+                                "issue_tags": issue_sel,
+                                "in_use": False,
+                                "user": None,
+                                "status_bucket": "To Test",
+                            }
+                            if set_hs != "(no change)":
+                                up["housing_status"] = None if set_hs == "Unknown" else set_hs
+                            if set_es != "(no change)":
+                                up["electronics_status"] = None if set_es == "Unknown" else set_es
+                            if note_add.strip():
+                                old = row.get("notes") or ""
+                                sep = " | " if old else ""
+                                up["notes"] = f"{old}{sep}{note_add.strip()}"
+
+                            sb.table("devices").update(up).eq("id", int(rid)).execute()
+                            log_action(
+                                actor, "request_maintenance",
+                                housing_id=row.get("housing_id"),
+                                electronics_id=row.get("electronics_id"),
+                                details=f"{issue_sel}"
+                            )
+                            updated += 1
+                        st.success(f"Submitted maintenance for {updated} device(s).")
+                        st.rerun()
+
+            # ---- Quick history peek for a selected single row
+            with st.expander("View history for one of your devices"):
+                # pick from your devices
+                hid_opt = [""] + sorted(mine["housing_id"].dropna().unique().tolist())
+                eid_opt = [""] + sorted(mine["electronics_id"].dropna().unique().tolist())
+                hh = st.selectbox("housing_id", hid_opt, key="mine_hist_h")
+                ee = st.selectbox("electronics_id", eid_opt, key="mine_hist_e")
+                if hh or ee:
+                    q = sb.table("actions").select("*")
+                    if hh: q = q.eq("housing_id", hh)
+                    if ee: q = q.eq("electronics_id", ee)
+                    acts = q.order("ts", desc=True).execute().data or []
+                    hist = pd.DataFrame(acts)
+                    if hist.empty:
+                        st.info("No history yet.")
+                    else:
+                        if not st.session_state.get("show_ids", False) and "id" in hist.columns:
+                            hist = hist.drop(columns=["id"])
+                        st.dataframe(hist, width="stretch")
+
+        # --- Request/assign new FEDs from Ready to yourself
+        st.markdown("#### Request FEDs from Ready pool")
+        ready = df_all[df_all["status_bucket"] == "Ready for Use"].copy()
+        if ready.empty:
+            st.caption("No ready devices available.")
+        else:
+            ready_view = ready[["id","housing_id","electronics_id","current_location","notes"]].copy()
+            ready_view.insert(0, "select", False)
+            ready_view = ready_view.set_index("id", drop=True)
+
+            ready_editor = st.data_editor(
+                ready_view,
+                hide_index=not st.session_state.get("show_ids", False),
+                width="stretch",
+                num_rows="fixed",
+                key="mine_ready_editor",
+                column_config={"select": st.column_config.CheckboxColumn("Select")}
+            )
+
+            c1, c2 = st.columns([2,1])
+            exp_date = c1.date_input("Experiment start date", value=None, key="mine_exp_date")
+            if c2.button("Assign selected to me"):
+                ids = [rid for rid, row in ready_editor.iterrows() if bool(row.get("select"))]
+                if not ids:
+                    st.warning("Select at least one Ready device.")
+                else:
+                    exp_iso = None
+                    if exp_date:
+                        try:
+                            exp_iso = pd.to_datetime(exp_date).to_pydatetime().isoformat()
+                        except Exception:
+                            exp_iso = None
+                    up = {
+                        "user": me_norm,
+                        "in_use": True,
+                        "status_bucket": "In Use",
+                        "exp_start_date": exp_iso
+                    }
+                    sb.table("devices").update(up).in_("id", ids).execute()
+                    # log each
+                    picked = ready[ready["id"].isin(ids)].to_dict(orient="records")
+                    for r in picked:
+                        log_action(
+                            actor, "allocate_to_self",
+                            housing_id=r.get("housing_id"),
+                            electronics_id=r.get("electronics_id"),
+                            details=f"user={me_norm}"
+                        )
+                    st.success(f"Assigned {len(ids)} device(s) to {me}.")
+                    st.rerun()
 
 # -------------------------------
 # Add Device
