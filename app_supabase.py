@@ -760,43 +760,60 @@ with tab_history:
             st.dataframe(hist, width="stretch")
 
 # -------------------------------
-# Inventory (optional)
+# Inventory (robust upsert)
 # -------------------------------
 with tab_inventory:
     st.subheader("Inventory")
-    inv = get_table_df("inventory")
-    if inv.empty:
-        st.caption("No items yet.")
-    else:
-        if not st.session_state.get("show_ids", False) and "id" in inv.columns:
-            inv = inv.drop(columns=["id"])
-        st.dataframe(inv, width="stretch")
 
-    st.write("Add / update an item")
-    item = st.text_input("Item")
-    qty = st.number_input("Quantity", value=0.0, step=1.0)
-    cA, cB, cC = st.columns(3)
-    if cA.button("Add / Update"):
-        if not item:
+    # Live view
+    inv = get_table_df("inventory")
+    if not st.session_state.get("show_ids", False) and "id" in inv.columns:
+        inv = inv.drop(columns=["id"])
+    st.dataframe(inv if not inv.empty else pd.DataFrame(columns=["item","qty"]), width="stretch")
+
+    st.write("Add / update / delete an item")
+
+    def _norm_item(name: str | None) -> str | None:
+        if name is None:
+            return None
+        s = str(name).strip()
+        return s if s else None
+
+    cA, cB, cC = st.columns([2,1,1])
+    item_input = cA.text_input("Item name", key="inv_item_input")
+    qty_input  = cB.number_input("Quantity", value=0.0, step=1.0, key="inv_qty_input")
+
+    col1, col2 = st.columns(2)
+
+    # Add/Update via UPSERT on unique item (no pre-checks needed)
+    if col1.button("Add / Update", key="inv_add_update"):
+        item_norm = _norm_item(item_input)
+        if not item_norm:
             st.warning("Enter an item name.")
         else:
-            ex = sb.table("inventory").select("id").eq("item", item).execute().data
-            if not ex:
-                sb.table("inventory").insert({"item": item, "qty": float(qty)}).execute()
-                log_action("system", "inv_add", details=f"{item}={qty}")
-            else:
-                sb.table("inventory").update({"qty": float(qty)}).eq("item", item).execute()
-                log_action("system", "inv_update", details=f"{item}={qty}")
-            st.success("Inventory updated.")
-            st.rerun()
-    if cB.button("Delete"):
-        if not item:
-            st.warning("Enter an item name.")
+            try:
+                payload = {"item": item_norm, "qty": float(qty_input)}
+                # one call handles both insert and update on conflict
+                sb.table("inventory").upsert(payload, on_conflict="item").execute()
+                log_action("system", "inv_upsert", details=f"{item_norm}={payload['qty']}")
+                st.success(f"Saved: {item_norm} → {payload['qty']}")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Inventory save failed: {e}")
+
+    # Delete by item name
+    if col2.button("Delete", key="inv_delete"):
+        item_norm = _norm_item(item_input)
+        if not item_norm:
+            st.warning("Enter an item name to delete.")
         else:
-            sb.table("inventory").delete().eq("item", item).execute()
-            log_action("system", "inv_delete", details=item)
-            st.success("Deleted.")
-            st.rerun()
+            try:
+                sb.table("inventory").delete().eq("item", item_norm).execute()
+                log_action("system", "inv_delete", details=item_norm)
+                st.success(f"Deleted: {item_norm}")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Delete failed: {e}")
 
 # -------------------------------
 # Admin (only if admin_enabled)
