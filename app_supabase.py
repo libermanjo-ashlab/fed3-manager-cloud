@@ -190,6 +190,11 @@ def working_housing_options() -> list[tuple[str, str]]:
         opts.append((hid, label))
     return opts
 
+def get_pool_df(name: str) -> pd.DataFrame:
+    data = sb.table(name).select("*").order("id").execute().data
+    return pd.DataFrame(data) if data else pd.DataFrame()
+
+
 def working_electronics_options() -> list[tuple[str, str]]:
     df = get_pool_df("electronics_pool")
     if df.empty:
@@ -850,25 +855,60 @@ with tab_history:
 with tab_inventory:
     st.subheader("Inventory")
 
-    # ------------ ELECTRONICS POOL ------------
+    # ------------------ GENERAL INVENTORY (kept) ------------------
+    inv = get_table_df("inventory")
+    if inv.empty:
+        st.caption("No general inventory items yet.")
+    else:
+        if not st.session_state.get("show_ids", False) and "id" in inv.columns:
+            inv = inv.drop(columns=["id"])
+        st.dataframe(inv, use_container_width=True)
+
+    st.write("Add / update a general inventory item")
+    item = st.text_input("Item", key="gen_item")
+    qty = st.number_input("Quantity", value=0.0, step=1.0, key="gen_qty")
+
+    cA, cB, _sp = st.columns([1,1,2])
+    if cA.button("Add / Update (general)", key="gen_add_update_btn"):
+        if not item:
+            st.warning("Enter an item name.")
+        else:
+            ex = sb.table("inventory").select("id").eq("item", item).execute().data
+            if not ex:
+                sb.table("inventory").insert({"item": item, "qty": float(qty)}).execute()
+                log_action("system", "inv_add", details=f"{item}={qty}")
+            else:
+                sb.table("inventory").update({"qty": float(qty)}).eq("item", item).execute()
+                log_action("system", "inv_update", details=f"{item}={qty}")
+            st.success("General inventory updated.")
+            st.rerun()
+
+    if cB.button("Delete (general)", key="gen_delete_btn"):
+        if not item:
+            st.warning("Enter an item name.")
+        else:
+            sb.table("inventory").delete().eq("item", item).execute()
+            log_action("system", "inv_delete", details=item)
+            st.success("Deleted from general inventory.")
+            st.rerun()
+
+    st.write("---")
+
+    # ------------------ ELECTRONICS POOL (new) ------------------
     st.markdown("### Electronics pool")
     ep = get_pool_df("electronics_pool")
-    if not ep.empty and not st.session_state.get("show_ids", False) and "id" in ep.columns:
-        ep_show = ep.drop(columns=["id"])
-    else:
-        ep_show = ep
+    ep_show = ep.drop(columns=["id"]) if (not st.session_state.get("show_ids", False) and "id" in ep.columns) else ep
     st.dataframe(ep_show, use_container_width=True)
 
     c1, c2, c3 = st.columns(3)
-    e_id   = c1.text_input("Electronics ID (optional)", key="inv_e_id")
-    e_stat = c2.selectbox("Status", ["Working","Broken","Unknown"], index=2, key="inv_e_status")
-    e_note = c3.text_input("Notes", key="inv_e_notes")
+    e_id   = c1.text_input("Electronics ID (optional)", key="pool_e_id")
+    e_stat = c2.selectbox("Status", ["Working","Broken","Unknown"], index=2, key="pool_e_status")
+    e_note = c3.text_input("Notes", key="pool_e_notes")
 
-    colA, colB = st.columns(2)
-    if colA.button("Add / Update electronics"):
+    d1, d2 = st.columns(2)
+    if d1.button("Add / Update electronics", key="pool_e_save"):
         payload = {"electronics_id": e_id or None, "status": e_stat, "notes": e_note or None}
         try:
-            # upsert by electronics_id (NULL won't match—insert)
             if e_id:
                 sb.table("electronics_pool").upsert(payload, on_conflict="electronics_id").execute()
             else:
@@ -878,7 +918,7 @@ with tab_inventory:
         except Exception as e:
             st.error(f"Save failed (electronics): {e}")
 
-    if colB.button("Delete electronics"):
+    if d2.button("Delete electronics", key="pool_e_delete"):
         if not e_id:
             st.warning("Enter an Electronics ID to delete.")
         else:
@@ -888,22 +928,19 @@ with tab_inventory:
 
     st.write("---")
 
-    # ------------ HOUSING POOL ------------
+    # ------------------ HOUSING POOL (new) ------------------
     st.markdown("### Housing pool")
     hp = get_pool_df("housing_pool")
-    if not hp.empty and not st.session_state.get("show_ids", False) and "id" in hp.columns:
-        hp_show = hp.drop(columns=["id"])
-    else:
-        hp_show = hp
+    hp_show = hp.drop(columns=["id"]) if (not st.session_state.get("show_ids", False) and "id" in hp.columns) else hp
     st.dataframe(hp_show, use_container_width=True)
 
     h1, h2, h3 = st.columns(3)
-    h_id   = h1.text_input("Housing ID (optional)", key="inv_h_id")
-    h_stat = h2.selectbox("Status ", ["Working","Broken","Unknown"], index=2, key="inv_h_status")
-    h_note = h3.text_input("Notes ", key="inv_h_notes")
+    h_id   = h1.text_input("Housing ID (optional)", key="pool_h_id")
+    h_stat = h2.selectbox("Status ", ["Working","Broken","Unknown"], index=2, key="pool_h_status")
+    h_note = h3.text_input("Notes ", key="pool_h_notes")
 
-    d1, d2 = st.columns(2)
-    if d1.button("Add / Update housing"):
+    p1, p2 = st.columns(2)
+    if p1.button("Add / Update housing", key="pool_h_save"):
         payload = {"housing_id": h_id or None, "status": h_stat, "notes": h_note or None}
         try:
             if h_id:
@@ -915,13 +952,14 @@ with tab_inventory:
         except Exception as e:
             st.error(f"Save failed (housing): {e}")
 
-    if d2.button("Delete housing"):
+    if p2.button("Delete housing", key="pool_h_delete"):
         if not h_id:
             st.warning("Enter a Housing ID to delete.")
         else:
             sb.table("housing_pool").delete().eq("housing_id", h_id).execute()
             st.success("Deleted housing part.")
             st.rerun()
+
 
 # -------------------------------
 # Admin (only if admin_enabled)
