@@ -170,6 +170,52 @@ def normalize_device(rec: dict) -> dict:
     out["status_bucket"] = compute_bucket(out)
     return out
 
+# --- Pools helpers ---
+def get_pool_df(name: str) -> pd.DataFrame:
+    data = sb.table(name).select("*").order("id").execute().data
+    return pd.DataFrame(data) if data else pd.DataFrame()
+
+def working_housing_options() -> list[tuple[str, str]]:
+    """Return [(value,label)] for selectbox; value is the actual housing_id (may be empty)."""
+    df = get_pool_df("housing_pool")
+    if df.empty:
+        return []
+    df = df[df["status"] == "Working"].copy()
+    # show both ID and a short notes preview
+    opts = []
+    for _, r in df.iterrows():
+        hid = (r.get("housing_id") or "").strip()
+        label = f"{hid or '(unassigned)'} — {r.get('notes') or ''}".strip(" —")
+        # value we store is the housing_id text (can be empty string if truly unassigned)
+        opts.append((hid, label))
+    return opts
+
+def working_electronics_options() -> list[tuple[str, str]]:
+    df = get_pool_df("electronics_pool")
+    if df.empty:
+        return []
+    df = df[df["status"] == "Working"].copy()
+    opts = []
+    for _, r in df.iterrows():
+        eid = (r.get("electronics_id") or "").strip()
+        label = f"{eid or '(unassigned)'} — {r.get('notes') or ''}".strip(" —")
+        opts.append((eid, label))
+    return opts
+
+def lookup_pool_notes_status(housing_id: str | None, electronics_id: str | None) -> dict:
+    """Fetch status/notes for chosen pool parts to prefill device fields."""
+    out = {}
+    if housing_id:
+        q = sb.table("housing_pool").select("status,notes").eq("housing_id", housing_id).limit(1).execute().data
+        if q:
+            out["housing_status"] = q[0].get("status")
+            out["housing_notes"] = q[0].get("notes")
+    if electronics_id:
+        q = sb.table("electronics_pool").select("status,notes").eq("electronics_id", electronics_id).limit(1).execute().data
+        if q:
+            out["electronics_status"] = q[0].get("status")
+            out["electronics_notes"] = q[0].get("notes")
+    return out
 
 
 # -------------------------------
@@ -677,49 +723,87 @@ with tab_mine:
 # -------------------------------
 with tab_add:
     st.subheader("Add a device")
+
+    # Build choices from pools (Working only)
+    housing_opts = working_housing_options()   # list of (value,label)
+    elec_opts    = working_electronics_options()
+
     c1, c2 = st.columns(2)
     with c1:
-        housing_id = st.text_input("Housing ID (e.g., H36)")
-        housing_status = st.selectbox("Housing status", ["Working","Broken","Unknown"], index=0)
+        housing_pick = st.selectbox(
+            "Choose Housing (Working only)",
+            options=[("", "-- None --")] + housing_opts,
+            format_func=lambda t: t[1] if isinstance(t, tuple) else t,
+            index=1 if len(housing_opts) else 0,
+            key="add_pick_housing",
+        )
+        # unpack value
+        housing_id_val = housing_pick[0] if isinstance(housing_pick, tuple) else None
         current_location = st.text_input("Location")
-        notes = st.text_input("Notes")
+        notes_extra = st.text_input("Additional notes (optional)")
     with c2:
-        electronics_id = st.text_input("Electronics ID (e.g., E36)")
-        electronics_status = st.selectbox("Electronics status", ["Working","Broken","Unknown"], index=0)
+        electronics_pick = st.selectbox(
+            "Choose Electronics (Working only)",
+            options=[("", "-- None --")] + elec_opts,
+            format_func=lambda t: t[1] if isinstance(t, tuple) else t,
+            index=1 if len(elec_opts) else 0,
+            key="add_pick_elec",
+        )
+        electronics_id_val = electronics_pick[0] if isinstance(electronics_pick, tuple) else None
+
         user_val = st.selectbox("User", USERS, index=USERS.index("Unassigned"))
         in_use = st.checkbox("In use", value=False)
         exp_start = st.date_input("Experiment start (optional)", value=None)
 
     if st.button("Create device"):
-        # Convert date picker first
+        # Pull status/notes from pools for the chosen IDs
+        enrich = lookup_pool_notes_status(
+            housing_id_val if housing_id_val else None,
+            electronics_id_val if electronics_id_val else None
+        )
+        housing_status = enrich.get("housing_status")
+        electronics_status = enrich.get("electronics_status")
+
+        # Combine notes (pool notes + extra)
+        base_notes = []
+        if enrich.get("housing_notes"):
+            base_notes.append(f"[Housing] {enrich['housing_notes']}")
+        if enrich.get("electronics_notes"):
+            base_notes.append(f"[Electronics] {enrich['electronics_notes']}")
+        if notes_extra:
+            base_notes.append(notes_extra)
+        combined_notes = " | ".join([s for s in base_notes if s])
+
+        # Date
         exp_iso = None
         if exp_start:
             try:
                 exp_iso = pd.to_datetime(exp_start).to_pydatetime().isoformat()
             except Exception:
                 exp_iso = None
-    
+
         rec = {
-            "housing_id": housing_id or None,
-            "electronics_id": electronics_id or None,
-            "housing_status": housing_status if housing_status != "Unknown" else None,
-            "electronics_status": electronics_status if electronics_status != "Unknown" else None,
+            "housing_id": housing_id_val or None,
+            "electronics_id": electronics_id_val or None,
+            "housing_status": housing_status or None,
+            "electronics_status": electronics_status or None,
             "current_location": current_location or None,
-            "notes": notes or None,
+            "notes": combined_notes or None,
             "user": normalize_user_val(user_val),
             "in_use": bool(in_use),
             "exp_start_date": exp_iso,
         }
-    
+
         rec = normalize_device(rec)
-    
+
         try:
+            # upsert using whichever ID is present
             if rec["housing_id"]:
                 sb.table("devices").upsert(rec, on_conflict="housing_id").execute()
             elif rec["electronics_id"]:
                 sb.table("devices").upsert(rec, on_conflict="electronics_id").execute()
             else:
-                st.warning("Provide at least one of housing_id or electronics_id.")
+                st.warning("Pick at least a housing or electronics part from the pools.")
                 st.stop()
 
             log_action(
@@ -731,6 +815,7 @@ with tab_add:
             st.rerun()
         except Exception as e:
             st.error(f"Could not save device: {e}")
+
 
 # -------------------------------
 # History
@@ -765,55 +850,78 @@ with tab_history:
 with tab_inventory:
     st.subheader("Inventory")
 
-    # Live view
-    inv = get_table_df("inventory")
-    if not st.session_state.get("show_ids", False) and "id" in inv.columns:
-        inv = inv.drop(columns=["id"])
-    st.dataframe(inv if not inv.empty else pd.DataFrame(columns=["item","qty"]), width="stretch")
+    # ------------ ELECTRONICS POOL ------------
+    st.markdown("### Electronics pool")
+    ep = get_pool_df("electronics_pool")
+    if not ep.empty and not st.session_state.get("show_ids", False) and "id" in ep.columns:
+        ep_show = ep.drop(columns=["id"])
+    else:
+        ep_show = ep
+    st.dataframe(ep_show, use_container_width=True)
 
-    st.write("Add / update / delete an item")
+    c1, c2, c3 = st.columns(3)
+    e_id   = c1.text_input("Electronics ID (optional)", key="inv_e_id")
+    e_stat = c2.selectbox("Status", ["Working","Broken","Unknown"], index=2, key="inv_e_status")
+    e_note = c3.text_input("Notes", key="inv_e_notes")
 
-    def _norm_item(name: str | None) -> str | None:
-        if name is None:
-            return None
-        s = str(name).strip()
-        return s if s else None
+    colA, colB = st.columns(2)
+    if colA.button("Add / Update electronics"):
+        payload = {"electronics_id": e_id or None, "status": e_stat, "notes": e_note or None}
+        try:
+            # upsert by electronics_id (NULL won't match—insert)
+            if e_id:
+                sb.table("electronics_pool").upsert(payload, on_conflict="electronics_id").execute()
+            else:
+                sb.table("electronics_pool").insert(payload).execute()
+            st.success("Saved electronics part.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Save failed (electronics): {e}")
 
-    cA, cB, cC = st.columns([2,1,1])
-    item_input = cA.text_input("Item name", key="inv_item_input")
-    qty_input  = cB.number_input("Quantity", value=0.0, step=1.0, key="inv_qty_input")
-
-    col1, col2 = st.columns(2)
-
-    # Add/Update via UPSERT on unique item (no pre-checks needed)
-    if col1.button("Add / Update", key="inv_add_update"):
-        item_norm = _norm_item(item_input)
-        if not item_norm:
-            st.warning("Enter an item name.")
+    if colB.button("Delete electronics"):
+        if not e_id:
+            st.warning("Enter an Electronics ID to delete.")
         else:
-            try:
-                payload = {"item": item_norm, "qty": float(qty_input)}
-                # one call handles both insert and update on conflict
-                sb.table("inventory").upsert(payload, on_conflict="item").execute()
-                log_action("system", "inv_upsert", details=f"{item_norm}={payload['qty']}")
-                st.success(f"Saved: {item_norm} → {payload['qty']}")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Inventory save failed: {e}")
+            sb.table("electronics_pool").delete().eq("electronics_id", e_id).execute()
+            st.success("Deleted electronics part.")
+            st.rerun()
 
-    # Delete by item name
-    if col2.button("Delete", key="inv_delete"):
-        item_norm = _norm_item(item_input)
-        if not item_norm:
-            st.warning("Enter an item name to delete.")
+    st.write("---")
+
+    # ------------ HOUSING POOL ------------
+    st.markdown("### Housing pool")
+    hp = get_pool_df("housing_pool")
+    if not hp.empty and not st.session_state.get("show_ids", False) and "id" in hp.columns:
+        hp_show = hp.drop(columns=["id"])
+    else:
+        hp_show = hp
+    st.dataframe(hp_show, use_container_width=True)
+
+    h1, h2, h3 = st.columns(3)
+    h_id   = h1.text_input("Housing ID (optional)", key="inv_h_id")
+    h_stat = h2.selectbox("Status ", ["Working","Broken","Unknown"], index=2, key="inv_h_status")
+    h_note = h3.text_input("Notes ", key="inv_h_notes")
+
+    d1, d2 = st.columns(2)
+    if d1.button("Add / Update housing"):
+        payload = {"housing_id": h_id or None, "status": h_stat, "notes": h_note or None}
+        try:
+            if h_id:
+                sb.table("housing_pool").upsert(payload, on_conflict="housing_id").execute()
+            else:
+                sb.table("housing_pool").insert(payload).execute()
+            st.success("Saved housing part.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Save failed (housing): {e}")
+
+    if d2.button("Delete housing"):
+        if not h_id:
+            st.warning("Enter a Housing ID to delete.")
         else:
-            try:
-                sb.table("inventory").delete().eq("item", item_norm).execute()
-                log_action("system", "inv_delete", details=item_norm)
-                st.success(f"Deleted: {item_norm}")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Delete failed: {e}")
+            sb.table("housing_pool").delete().eq("housing_id", h_id).execute()
+            st.success("Deleted housing part.")
+            st.rerun()
 
 # -------------------------------
 # Admin (only if admin_enabled)
