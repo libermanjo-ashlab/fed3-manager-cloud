@@ -718,16 +718,16 @@ with tab_mine:
                 ids = [rid for rid, row in edited_mine.iterrows() if bool(row.get("select"))]
                 if not ids:
                         st.warning("Select at least one row above.")
-                    else:
-                        updated = 0
-                        for rid in ids:
-                        row = mine[mine["id"] == rid].iloc[0]
-                            up = {
-                                "issue_tags": issue_sel,
-                                "in_use": False,
-                                "user": None,
-                                "status_bucket": "To Test",
-                            }
+                else:
+                    updated = 0
+                    for rid in ids:
+                    row = mine[mine["id"] == rid].iloc[0]
+                        up = {
+                            "issue_tags": issue_sel,
+                        "in_use": False,
+                            "user": None,
+                            "status_bucket": "To Test",
+                        }
                             if set_hs != "(no change)":
                                 up["housing_status"] = None if set_hs == "Unknown" else set_hs
                             if set_es != "(no change)":
