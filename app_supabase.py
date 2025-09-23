@@ -222,6 +222,42 @@ def lookup_pool_notes_status(housing_id: str | None, electronics_id: str | None)
             out["electronics_notes"] = q[0].get("notes")
     return out
 
+def fetch_actions_snapshot(housing_id: str | None, electronics_id: str | None) -> list[dict]:
+    q = sb.table("actions").select("*")
+    if housing_id:
+        q = q.eq("housing_id", housing_id)
+    if electronics_id:
+        q = q.eq("electronics_id", electronics_id)
+    q = q.order("ts", desc=True)
+    return q.execute().data or []
+
+def fetch_device_snapshot(housing_id: str | None, electronics_id: str | None) -> dict | None:
+    # Try by housing_id first, else by electronics_id
+    if housing_id:
+        row = sb.table("devices").select("*").eq("housing_id", housing_id).limit(1).execute().data
+        if row: return row[0]
+    if electronics_id:
+        row = sb.table("devices").select("*").eq("electronics_id", electronics_id).limit(1).execute().data
+        if row: return row[0]
+    return None
+
+def archive_one(housing_id: str | None, electronics_id: str | None, reason: str | None, actor: str):
+    dev_snap = fetch_device_snapshot(housing_id, electronics_id)
+    acts_snap = fetch_actions_snapshot(housing_id, electronics_id)
+    rec = {
+        "housing_id": housing_id,
+        "electronics_id": electronics_id,
+        "reason": reason or None,
+        "device_snapshot": dev_snap or None,
+        "actions_snapshot": acts_snap or None,
+    }
+    sb.table("archive").insert(rec).execute()
+    # write an action for visibility
+    log_action(actor, "archive", housing_id=housing_id, electronics_id=electronics_id, details=(reason or ""))
+
+
+
+
 
 # -------------------------------
 # Sidebar
@@ -494,6 +530,50 @@ with st.expander("Bulk edit selected rows"):
                 st.success(f"Deleted {len(ids)} row(s).")
                 st.rerun()
 
+with st.expander("Archive selected"):
+    c1, c2, c3 = st.columns(3)
+    arch_mode = c1.selectbox(
+        "Archive what?",
+        ["Housing only", "Electronics only", "Both (pair)"],
+        key="ov_arch_mode"
+    )
+    arch_reason = c2.text_input("Reason / note (optional)", key="ov_arch_reason")
+    confirm_txt = c3.text_input("Type ARCHIVE to confirm", key="ov_arch_confirm")
+
+    if st.button("Archive", key="ov_arch_btn"):
+        if confirm_txt.strip().upper() != "ARCHIVE":
+            st.warning("Please type ARCHIVE to confirm.")
+        else:
+            # Which rows are checked in the editor?
+            selected_ids = [rid for rid, row in edited.iterrows() if bool(row.get("select"))]
+            if not selected_ids:
+                st.warning("Select at least one row above.")
+            else:
+                df_all = get_table_df("devices")
+                target = df_all[df_all["id"].isin(selected_ids)]
+                count = 0
+                for _, r in target.iterrows():
+                    hid = r.get("housing_id")
+                    eid = r.get("electronics_id")
+                    if arch_mode == "Housing only" and hid:
+                        archive_one(hid, None, arch_reason, actor)
+                        count += 1
+                    elif arch_mode == "Electronics only" and eid:
+                        archive_one(None, eid, arch_reason, actor)
+                        count += 1
+                    elif arch_mode == "Both (pair)":
+                        # Will store both ids in a single archive row
+                        archive_one(hid if pd.notna(hid) else None, eid if pd.notna(eid) else None, arch_reason, actor)
+                        count += 1
+                if count:
+                    st.success(f"Archived {count} selection(s).")
+                    st.rerun()
+                else:
+                    st.info("Nothing archived (missing IDs?).")
+
+
+
+
 # -------------------------------
 # My FEDs (researcher view)
 # -------------------------------
@@ -617,7 +697,70 @@ with tab_mine:
                 set_hs    = c2.selectbox("Set housing status", ["(no change)", "Working", "Broken", "Unknown"], index=0, key="myfeds_set_hs")
                 set_es    = c3.selectbox("Set electronics status", ["(no change)", "Working", "Broken", "Unknown"], index=0, key="myfeds_set_es")
                 note_add  = st.text_input("Maintenance note (append)", key="myfeds_note_add")
-            
+
+                with st.expander("Request maintenance for selected"):
+    c1, c2, c3 = st.columns(3)
+    issue_sel = c1.selectbox("Issue", ISSUE_OPTIONS, key="mine_maint_issue")
+    set_hs = c2.selectbox("Set housing status", ["(no change)", "Working", "Broken", "Unknown"], index=0, key="mine_maint_hs")
+    set_es = c3.selectbox("Set electronics status", ["(no change)", "Working", "Broken", "Unknown"], index=0, key="mine_maint_es")
+    note_add = st.text_input("Maintenance note (append)", key="mine_maint_note")
+
+    a1, a2 = st.columns(2)
+    arch_choice = a1.selectbox(
+        "Also archive… (optional)",
+        ["No archive", "Housing only", "Electronics only", "Both (pair)"],
+        index=0,
+        key="mine_maint_archive_choice"
+    )
+    arch_reason = a2.text_input("Archive reason (optional)", key="mine_maint_archive_reason")
+
+    if st.button("Submit maintenance request", key="mine_maint_submit"):
+        ids = [rid for rid, row in edited_mine.iterrows() if bool(row.get("select"))]
+        if not ids:
+            st.warning("Select at least one row above.")
+        else:
+            updated = 0
+            for rid in ids:
+                row = mine[mine["id"] == rid].iloc[0]
+                up = {
+                    "issue_tags": issue_sel,
+                    "in_use": False,
+                    "user": None,
+                    "status_bucket": "To Test",
+                }
+                if set_hs != "(no change)":
+                    up["housing_status"] = None if set_hs == "Unknown" else set_hs
+                if set_es != "(no change)":
+                    up["electronics_status"] = None if set_es == "Unknown" else set_es
+                if note_add.strip():
+                    old = row.get("notes") or ""
+                    sep = " | " if old else ""
+                    up["notes"] = f"{old}{sep}{note_add.strip()}"
+
+                sb.table("devices").update(up).eq("id", int(rid)).execute()
+                log_action(
+                    actor, "request_maintenance",
+                    housing_id=row.get("housing_id"),
+                    electronics_id=row.get("electronics_id"),
+                    details=f"{issue_sel}"
+                )
+
+                # Optional archive alongside maintenance
+                hid = row.get("housing_id"); eid = row.get("electronics_id")
+                if arch_choice == "Housing only" and pd.notna(hid):
+                    archive_one(hid, None, arch_reason, actor)
+                elif arch_choice == "Electronics only" and pd.notna(eid):
+                    archive_one(None, eid, arch_reason, actor)
+                elif arch_choice == "Both (pair)":
+                    archive_one(hid if pd.notna(hid) else None, eid if pd.notna(eid) else None, arch_reason, actor)
+
+                updated += 1
+
+            st.success(f"Submitted maintenance for {updated} device(s).")
+            st.rerun()
+
+
+                
                 if st.button("Submit maintenance request", key="myfeds_submit_maint"):
                     ids = [rid for rid, row in edited_mine.iterrows() if bool(row.get("select"))]
                     if not ids:
@@ -825,6 +968,7 @@ with tab_add:
 # -------------------------------
 # History
 # -------------------------------
+
 with tab_history:
     st.subheader("Device history")
     df_all = get_table_df("devices")
@@ -848,6 +992,40 @@ with tab_history:
             if not st.session_state.get("show_ids", False) and "id" in hist.columns:
                 hist = hist.drop(columns=["id"])
             st.dataframe(hist, width="stretch")
+
+
+    # --- Archive viewer (new) ---
+st.write("---")
+st.subheader("Archive")
+
+arch = sb.table("archive").select("*").order("created_at", desc=True).execute().data or []
+arch_df = pd.DataFrame(arch)
+
+# quick filters
+colA, colB = st.columns(2)
+f_h = colA.text_input("Filter by housing_id (contains)", key="arch_filter_h")
+f_e = colB.text_input("Filter by electronics_id (contains)", key="arch_filter_e")
+
+show_arch = arch_df.copy()
+for col, val in (("housing_id", f_h), ("electronics_id", f_e)):
+    if val:
+        show_arch = show_arch[show_arch[col].fillna("").str.contains(val, case=False, na=False)]
+
+# Brief table
+brief_cols = [c for c in ["id","created_at","housing_id","electronics_id","reason"] if c in show_arch.columns]
+st.dataframe(show_arch[brief_cols] if brief_cols else show_arch, use_container_width=True)
+
+# Drill-in: pick an archive row to inspect snapshots
+arch_ids = show_arch["id"].tolist() if "id" in show_arch.columns else []
+chosen_arch = st.selectbox("View snapshot for archive id", [""] + [str(x) for x in arch_ids], key="arch_pick")
+if chosen_arch:
+    chosen_arch = int(chosen_arch)
+    rec = show_arch[show_arch["id"] == chosen_arch].iloc[0].to_dict()
+    st.markdown("**Device snapshot (at archive time):**")
+    st.json(rec.get("device_snapshot") or {})
+    st.markdown("**Actions snapshot (at archive time):**")
+    st.json(rec.get("actions_snapshot") or [])
+
 
 # -------------------------------
 # Inventory (robust upsert)
