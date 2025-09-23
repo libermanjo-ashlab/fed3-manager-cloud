@@ -1034,256 +1034,217 @@ if chosen_arch:
 with tab_inventory:
     st.subheader("Inventory")
 
-    inv_tabs = st.tabs(["General", "Electronics Pool", "Housing Pool"])
+    # ---- helpers (local to this tab) ----
+    def _present(df: pd.DataFrame, cols: list[str]) -> list[str]:
+        """Return only the columns that exist in df (for safe slicing)."""
+        return [c for c in cols if c in df.columns]
 
-    # ---------- helpers just for this tab ----------
-    def _norm_status(x):
-        if x is None or (isinstance(x, float) and pd.isna(x)):
-            return None
-        s = str(x).strip()
-        return None if s == "" or s.lower() == "unknown" else s.title()
+    def _ensure_cols(df: pd.DataFrame, spec: dict[str, str]) -> pd.DataFrame:
+        """Make sure df has these columns with safe dtypes."""
+        for col, dtype in spec.items():
+            if col not in df.columns:
+                df[col] = pd.Series(dtype=dtype)
+        return df
 
-    def _clean_text(x):
-        if x is None or (isinstance(x, float) and pd.isna(x)):
-            return None
-        s = str(x).strip()
-        return s if s else None
+    def _bool(v):
+        if isinstance(v, bool): return v
+        if v is None or (isinstance(v, float) and pd.isna(v)): return False
+        return str(v).strip().lower() in ("1","true","yes","y")
 
-    # ---------- General inventory (unchanged behavior + select/delete) ----------
-    with inv_tabs[0]:
-        inv = get_table_df("inventory")
-        if inv.empty:
-            inv = pd.DataFrame(columns=["id", "item", "qty", "created_at", "updated_at"])
+    # ===============================================================
+    # A) GENERAL INVENTORY  (table: inventory)
+    # ===============================================================
+    st.markdown("### General Inventory")
 
-        # show a selectable editor
-        view = inv.copy()
-        if "id" not in view.columns:
-            view["id"] = pd.Series(dtype="Int64")
-        view.insert(0, "select", False)
+    inv = get_table_df("inventory")
+    inv = _ensure_cols(inv, {"id": "Int64", "item": "object", "qty": "float", "created_at": "object"})
 
-        cfg = {
-            "select": st.column_config.CheckboxColumn("Select"),
-            "item": st.column_config.TextColumn("Item"),
-            "qty": st.column_config.NumberColumn("Quantity", min_value=0, step=1),
-        }
+    # Build editor view (add a selection checkbox)
+    view = inv.copy()
+    view.insert(0, "select", False)
 
-        edited = st.data_editor(
-            view[["select","id","item","qty","created_at"]],
-            hide_index=True,
-            column_config=cfg,
-            width="stretch",
-            num_rows="dynamic",
-            key="gen_inventory_editor",
-        )
+    cfg = {
+        "select": st.column_config.CheckboxColumn("Select"),
+        "item": st.column_config.TextColumn("Item"),
+        "qty": st.column_config.NumberColumn("Quantity", step=1.0, format="%.2f"),
+        # show created_at if present; if not, it's silently omitted by _present()
+        "created_at": st.column_config.TextColumn("Created"),
+    }
 
-        cA, cB, cC = st.columns(3)
+    cols_general = _present(view, ["select", "id", "item", "qty", "created_at"])
+    edited = st.data_editor(
+        view[cols_general],
+        hide_index=True,
+        column_config=cfg,
+        width="stretch",
+        num_rows="dynamic",
+        key="gen_inventory_editor",
+    )
 
-        if cA.button("Save all changes (General)"):
-            # inserts (rows where id is NaN but have item)
-            to_insert = []
-            to_update = []
-            base_by_id = {int(r["id"]): r for _, r in inv.iterrows() if pd.notna(r.get("id"))}
-            for _, r in edited.iterrows():
-                rid = r.get("id")
-                item = _clean_text(r.get("item"))
-                qty = r.get("qty")
-                if pd.isna(rid):
-                    # new row (only insert if has an item)
-                    if item is not None:
-                        to_insert.append({"item": item, "qty": float(qty or 0)})
-                else:
-                    rid = int(rid)
-                    before = base_by_id.get(rid, {})
-                    if (before.get("item") != item) or (float(before.get("qty", 0) or 0) != float(qty or 0)):
-                        to_update.append((rid, {"item": item, "qty": float(qty or 0)}))
+    cA, cB, cC = st.columns([1,1,2])
+    if cA.button("Save selected (General)"):
+        ids = []
+        inserts = []
+        for _, row in edited.iterrows():
+            if not _bool(row.get("select")):
+                continue
+            rid = row.get("id")
+            item = (row.get("item") or "").strip() or None
+            qty  = float(row.get("qty") or 0)
+            if pd.notna(rid):
+                # update by id
+                sb.table("inventory").update({"item": item, "qty": qty}).eq("id", int(rid)).execute()
+            else:
+                # insert new
+                inserts.append({"item": item, "qty": qty})
+        if inserts:
+            sb.table("inventory").insert(inserts).execute()
+        st.success("Saved.")
+        st.rerun()
 
-            # write
-            if to_insert:
-                sb.table("inventory").insert(to_insert).execute()
-            for rid, upd in to_update:
-                sb.table("inventory").update(upd).eq("id", rid).execute()
-
-            st.success(f"Saved: +{len(to_insert)} inserted, {len(to_update)} updated.")
+    if cB.button("Delete selected (General)"):
+        ids = [int(r.get("id")) for _, r in edited.iterrows() if _bool(r.get("select")) and pd.notna(r.get("id"))]
+        if ids:
+            sb.table("inventory").delete().in_("id", ids).execute()
+            st.success(f"Deleted {len(ids)} row(s).")
             st.rerun()
+        else:
+            st.info("Nothing selected with a saved ID to delete.")
 
-        if cB.button("Delete selected (General)"):
-            ids = [int(r["id"]) for _, r in edited.iterrows() if bool(r.get("select")) and pd.notna(r.get("id"))]
-            if not ids:
-                st.warning("Select at least one existing row.")
+    st.divider()
+
+    # ===============================================================
+    # B) ELECTRONICS INVENTORY  (table: inventory_electronics)
+    # ===============================================================
+    st.markdown("### Electronics Inventory")
+
+    inv_e = get_table_df("inventory_electronics")
+    inv_e = _ensure_cols(inv_e, {
+        "id": "Int64",
+        "electronics_id": "object",
+        "status": "object",
+        "notes": "object",
+        "created_at": "object",
+    })
+
+    v_e = inv_e.copy()
+    v_e.insert(0, "select", False)
+
+    status_opts = ["Working", "Broken", "Unknown"]
+
+    cfg_e = {
+        "select": st.column_config.CheckboxColumn("Select"),
+        "electronics_id": st.column_config.TextColumn("Electronics ID (optional)"),
+        "status": st.column_config.SelectboxColumn("Status", options=status_opts),
+        "notes": st.column_config.TextColumn("Notes"),
+        "created_at": st.column_config.TextColumn("Created"),
+    }
+
+    cols_e = _present(v_e, ["select", "id", "electronics_id", "status", "notes", "created_at"])
+    eedit = st.data_editor(
+        v_e[cols_e],
+        hide_index=True,
+        column_config=cfg_e,
+        width="stretch",
+        num_rows="dynamic",
+        key="inv_elec_editor",
+    )
+
+    ec1, ec2, ec3 = st.columns([1,1,2])
+    if ec1.button("Save selected (Electronics)"):
+        inserts = []
+        for _, row in eedit.iterrows():
+            if not _bool(row.get("select")):
+                continue
+            rid = row.get("id")
+            eid = (row.get("electronics_id") or "").strip() or None
+            stt = (row.get("status") or "").strip().title() or None
+            nts = (row.get("notes") or "").strip() or None
+            rec = {"electronics_id": eid, "status": stt, "notes": nts}
+            if pd.notna(rid):
+                sb.table("inventory_electronics").update(rec).eq("id", int(rid)).execute()
             else:
-                sb.table("inventory").delete().in_("id", ids).execute()
-                st.success(f"Deleted {len(ids)} item(s).")
-                st.rerun()
+                inserts.append(rec)
+        if inserts:
+            sb.table("inventory_electronics").insert(inserts).execute()
+        st.success("Saved.")
+        st.rerun()
 
-        # quick add/update via simple fields (kept from your old UI)
-        st.write("---")
-        st.write("Quick add / update")
-        item = st.text_input("Item")
-        qty = st.number_input("Quantity", value=0.0, step=1.0)
-        cX, cY = st.columns(2)
-        if cX.button("Add / Update (Quick)"):
-            if not item.strip():
-                st.warning("Enter an item name.")
-            else:
-                ex = sb.table("inventory").select("id").eq("item", item).execute().data
-                if not ex:
-                    sb.table("inventory").insert({"item": item, "qty": float(qty)}).execute()
-                else:
-                    sb.table("inventory").update({"qty": float(qty)}).eq("item", item).execute()
-                st.success("Inventory updated.")
-                st.rerun()
-        if cY.button("Delete (Quick)"):
-            if not item.strip():
-                st.warning("Enter an item name.")
-            else:
-                sb.table("inventory").delete().eq("item", item).execute()
-                st.success("Deleted.")
-                st.rerun()
-
-    # ---------- Electronics Pool ----------
-    with inv_tabs[1]:
-        st.caption("Add, edit, or delete electronics boards (IDs can be blank).")
-
-        edf = get_table_df("inventory_electronics")
-        if edf.empty:
-            edf = pd.DataFrame(columns=["id","electronics_id","status","notes","created_at","updated_at"])
-
-        # Build editable table
-        view = edf.copy()
-        view.insert(0, "select", False)
-
-        # status choices
-        E_STATUS = ["Working", "Broken", "Unknown"]
-
-        cfg = {
-            "select": st.column_config.CheckboxColumn("Select"),
-            "electronics_id": st.column_config.TextColumn("Electronics ID"),
-            "status": st.column_config.SelectboxColumn("Status", options=E_STATUS),
-            "notes": st.column_config.TextColumn("Notes"),
-        }
-
-        eedit = st.data_editor(
-            view[["select","id","electronics_id","status","notes","created_at"]],
-            hide_index=True,
-            column_config=cfg,
-            width="stretch",
-            num_rows="dynamic",         # allow new rows
-            key="inv_elec_editor",
-        )
-
-        c1, c2 = st.columns(2)
-        if c1.button("Save all changes (Electronics)"):
-            base_by_id = {int(r["id"]): r for _, r in edf.iterrows() if pd.notna(r.get("id"))}
-            to_insert, to_update = [], []
-
-            for _, r in eedit.iterrows():
-                rid = r.get("id")
-                eid = _clean_text(r.get("electronics_id"))
-                stt = _norm_status(r.get("status"))
-                nts = _clean_text(r.get("notes"))
-
-                if pd.isna(rid):
-                    # New row? Insert if there is any meaningful data
-                    if eid or stt or nts:
-                        to_insert.append({"electronics_id": eid, "status": stt, "notes": nts})
-                else:
-                    rid = int(rid)
-                    b = base_by_id.get(rid, {})
-                    changed = (
-                        (b.get("electronics_id") or None) != eid or
-                        _norm_status(b.get("status")) != stt or
-                        (b.get("notes") or None) != nts
-                    )
-                    if changed:
-                        to_update.append((rid, {"electronics_id": eid, "status": stt, "notes": nts}))
-
-            if to_insert:
-                sb.table("inventory_electronics").insert(to_insert).execute()
-            for rid, upd in to_update:
-                sb.table("inventory_electronics").update(upd).eq("id", rid).execute()
-
-            st.success(f"Saved: +{len(to_insert)} inserted, {len(to_update)} updated.")
+    if ec2.button("Delete selected (Electronics)"):
+        ids = [int(r.get("id")) for _, r in eedit.iterrows() if _bool(r.get("select")) and pd.notna(r.get("id"))]
+        if ids:
+            sb.table("inventory_electronics").delete().in_("id", ids).execute()
+            st.success(f"Deleted {len(ids)} row(s).")
             st.rerun()
+        else:
+            st.info("Nothing selected with a saved ID to delete.")
 
-        if c2.button("Delete selected (Electronics)"):
-            ids = [int(r["id"]) for _, r in eedit.iterrows() if bool(r.get("select")) and pd.notna(r.get("id"))]
-            if not ids:
-                st.warning("Select at least one existing row.")
+    st.divider()
+
+    # ===============================================================
+    # C) HOUSING INVENTORY  (table: inventory_housing)
+    # ===============================================================
+    st.markdown("### Housing Inventory")
+
+    inv_h = get_table_df("inventory_housing")
+    inv_h = _ensure_cols(inv_h, {
+        "id": "Int64",
+        "housing_id": "object",
+        "status": "object",
+        "notes": "object",
+        "created_at": "object",
+    })
+
+    v_h = inv_h.copy()
+    v_h.insert(0, "select", False)
+
+    cfg_h = {
+        "select": st.column_config.CheckboxColumn("Select"),
+        "housing_id": st.column_config.TextColumn("Housing ID (optional)"),
+        "status": st.column_config.SelectboxColumn("Status", options=status_opts),
+        "notes": st.column_config.TextColumn("Notes"),
+        "created_at": st.column_config.TextColumn("Created"),
+    }
+
+    cols_h = _present(v_h, ["select", "id", "housing_id", "status", "notes", "created_at"])
+    hedit = st.data_editor(
+        v_h[cols_h],
+        hide_index=True,
+        column_config=cfg_h,
+        width="stretch",
+        num_rows="dynamic",
+        key="inv_housing_editor",
+    )
+
+    hc1, hc2, hc3 = st.columns([1,1,2])
+    if hc1.button("Save selected (Housing)"):
+        inserts = []
+        for _, row in hedit.iterrows():
+            if not _bool(row.get("select")):
+                continue
+            rid = row.get("id")
+            hid = (row.get("housing_id") or "").strip() or None
+            stt = (row.get("status") or "").strip().title() or None
+            nts = (row.get("notes") or "").strip() or None
+            rec = {"housing_id": hid, "status": stt, "notes": nts}
+            if pd.notna(rid):
+                sb.table("inventory_housing").update(rec).eq("id", int(rid)).execute()
             else:
-                sb.table("inventory_electronics").delete().in_("id", ids).execute()
-                st.success(f"Deleted {len(ids)} row(s).")
-                st.rerun()
+                inserts.append(rec)
+        if inserts:
+            sb.table("inventory_housing").insert(inserts).execute()
+        st.success("Saved.")
+        st.rerun()
 
-    # ---------- Housing Pool ----------
-    with inv_tabs[2]:
-        st.caption("Add, edit, or delete housings (IDs can be blank).")
-
-        hdf = get_table_df("inventory_housing")
-        if hdf.empty:
-            hdf = pd.DataFrame(columns=["id","housing_id","status","notes","created_at","updated_at"])
-
-        view = hdf.copy()
-        view.insert(0, "select", False)
-
-        H_STATUS = ["Working", "Broken", "Unknown"]
-
-        cfg = {
-            "select": st.column_config.CheckboxColumn("Select"),
-            "housing_id": st.column_config.TextColumn("Housing ID"),
-            "status": st.column_config.SelectboxColumn("Status", options=H_STATUS),
-            "notes": st.column_config.TextColumn("Notes"),
-        }
-
-        hedit = st.data_editor(
-            view[["select","id","housing_id","status","notes","created_at"]],
-            hide_index=True,
-            column_config=cfg,
-            width="stretch",
-            num_rows="dynamic",
-            key="inv_housing_editor",
-        )
-
-        d1, d2 = st.columns(2)
-        if d1.button("Save all changes (Housing)"):
-            base_by_id = {int(r["id"]): r for _, r in hdf.iterrows() if pd.notna(r.get("id"))}
-            to_insert, to_update = [], []
-
-            for _, r in hedit.iterrows():
-                rid = r.get("id")
-                hid = _clean_text(r.get("housing_id"))
-                stt = _norm_status(r.get("status"))
-                nts = _clean_text(r.get("notes"))
-
-                if pd.isna(rid):
-                    if hid or stt or nts:
-                        to_insert.append({"housing_id": hid, "status": stt, "notes": nts})
-                else:
-                    rid = int(rid)
-                    b = base_by_id.get(rid, {})
-                    changed = (
-                        (b.get("housing_id") or None) != hid or
-                        _norm_status(b.get("status")) != stt or
-                        (b.get("notes") or None) != nts
-                    )
-                    if changed:
-                        to_update.append((rid, {"housing_id": hid, "status": stt, "notes": nts}))
-
-            if to_insert:
-                sb.table("inventory_housing").insert(to_insert).execute()
-            for rid, upd in to_update:
-                sb.table("inventory_housing").update(upd).eq("id", rid).execute()
-
-            st.success(f"Saved: +{len(to_insert)} inserted, {len(to_update)} updated.")
+    if hc2.button("Delete selected (Housing)"):
+        ids = [int(r.get("id")) for _, r in hedit.iterrows() if _bool(r.get("select")) and pd.notna(r.get("id"))]
+        if ids:
+            sb.table("inventory_housing").delete().in_("id", ids).execute()
+            st.success(f"Deleted {len(ids)} row(s).")
             st.rerun()
+        else:
+            st.info("Nothing selected with a saved ID to delete.")
 
-        if d2.button("Delete selected (Housing)"):
-            ids = [int(r["id"]) for _, r in hedit.iterrows() if bool(r.get("select")) and pd.notna(r.get("id"))]
-            if not ids:
-                st.warning("Select at least one existing row.")
-            else:
-                sb.table("inventory_housing").delete().in_("id", ids).execute()
-                st.success(f"Deleted {len(ids)} row(s).")
-                st.rerun()
 
 # -------------------------------
 # Admin (only if admin_enabled)
