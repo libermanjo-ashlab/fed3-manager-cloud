@@ -712,52 +712,52 @@ with tab_mine:
                     index=0,
                     key="mine_maint_archive_choice"
                     )
-                    arch_reason = a2.text_input("Archive reason (optional)", key="mine_maint_archive_reason")
+                arch_reason = a2.text_input("Archive reason (optional)", key="mine_maint_archive_reason")
                 
-                if st.button("Submit maintenance request", key="mine_maint_submit"):
-                    ids = [rid for rid, row in edited_mine.iterrows() if bool(row.get("select"))]
-                    if not ids:
-                            st.warning("Select at least one row above.")
-                        else:
-                            updated = 0
-                            for rid in ids:
-                                row = mine[mine["id"] == rid].iloc[0]
-                                up = {
-                                    "issue_tags": issue_sel,
-                                    "in_use": False,
-                                    "user": None,
-                                    "status_bucket": "To Test",
-                                }
-                                if set_hs != "(no change)":
-                                    up["housing_status"] = None if set_hs == "Unknown" else set_hs
-                                if set_es != "(no change)":
-                                    up["electronics_status"] = None if set_es == "Unknown" else set_es
-                                if note_add.strip():
-                                    old = row.get("notes") or ""
-                                    sep = " | " if old else ""
-                                    up["notes"] = f"{old}{sep}{note_add.strip()}"
+            if st.button("Submit maintenance request", key="mine_maint_submit"):
+                ids = [rid for rid, row in edited_mine.iterrows() if bool(row.get("select"))]
+                if not ids:
+                        st.warning("Select at least one row above.")
+                    else:
+                        updated = 0
+                        for rid in ids:
+                        row = mine[mine["id"] == rid].iloc[0]
+                            up = {
+                                "issue_tags": issue_sel,
+                                "in_use": False,
+                                "user": None,
+                                "status_bucket": "To Test",
+                            }
+                            if set_hs != "(no change)":
+                                up["housing_status"] = None if set_hs == "Unknown" else set_hs
+                            if set_es != "(no change)":
+                                up["electronics_status"] = None if set_es == "Unknown" else set_es
+                              if note_add.strip():
+                                old = row.get("notes") or ""
+                                sep = " | " if old else ""
+                                up["notes"] = f"{old}{sep}{note_add.strip()}"
                 
-                                sb.table("devices").update(up).eq("id", int(rid)).execute()
-                                log_action(
-                                    actor, "request_maintenance",
-                                    housing_id=row.get("housing_id"),
-                                    electronics_id=row.get("electronics_id"),
-                                    details=f"{issue_sel}"
-                                )
+                            sb.table("devices").update(up).eq("id", int(rid)).execute()
+                            log_action(
+                                 actor, "request_maintenance",
+                                housing_id=row.get("housing_id"),
+                                electronics_id=row.get("electronics_id"),
+                                details=f"{issue_sel}"
+                            )
                 
-                                # Optional archive alongside maintenance
-                                hid = row.get("housing_id"); eid = row.get("electronics_id")
-                                if arch_choice == "Housing only" and pd.notna(hid):
-                                    archive_one(hid, None, arch_reason, actor)
-                                elif arch_choice == "Electronics only" and pd.notna(eid):
-                                    archive_one(None, eid, arch_reason, actor)
-                                elif arch_choice == "Both (pair)":
-                                    archive_one(hid if pd.notna(hid) else None, eid if pd.notna(eid) else None, arch_reason, actor)
+                            # Optional archive alongside maintenance
+                            hid = row.get("housing_id"); eid = row.get("electronics_id")
+                            if arch_choice == "Housing only" and pd.notna(hid):
+                                archive_one(hid, None, arch_reason, actor)
+                            elif arch_choice == "Electronics only" and pd.notna(eid):
+                                archive_one(None, eid, arch_reason, actor)
+                            elif arch_choice == "Both (pair)":
+                                archive_one(hid if pd.notna(hid) else None, eid if pd.notna(eid) else None, arch_reason, actor)
                 
-                                updated += 1
+                            updated += 1
                 
-                            st.success(f"Submitted maintenance for {updated} device(s).")
-                            st.rerun()
+                        st.success(f"Submitted maintenance for {updated} device(s).")
+                        st.rerun()
 
 
                 
