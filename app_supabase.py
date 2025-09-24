@@ -256,6 +256,72 @@ def archive_one(housing_id: str | None, electronics_id: str | None, reason: str 
     log_action(actor, "archive", housing_id=housing_id, electronics_id=electronics_id, details=(reason or ""))
 
 
+def archive_selected_devices(rows: list[dict], archive_housing: bool, archive_electronics: bool, actor: str, note: str = ""):
+    """
+    For each selected device row:
+      - Write archive snapshot(s)
+      - Return the non-archived side to its pool as Working
+      - Deactivate the device row (is_active=False)
+    """
+    for r in rows:
+        rid = int(r["id"])
+        hid = r.get("housing_id")
+        eid = r.get("electronics_id")
+
+        # 1) Record the combo in archive_pairs (one row per archive action)
+        try:
+            sb.table("archive_pairs").insert({
+                "housing_id": hid, "electronics_id": eid,
+                "archived_by": actor, "note": (note or "")
+            }).execute()
+        except Exception:
+            pass
+
+        # 2) Per-part archival logs
+        try:
+            if archive_housing and hid:
+                sb.table("archival_logs").insert({
+                    "kind": "housing", "id_value": hid,
+                    "action": "archive", "note": note or ""
+                }).execute()
+            if archive_electronics and eid:
+                sb.table("archival_logs").insert({
+                    "kind": "electronics", "id_value": eid,
+                    "action": "archive", "note": note or ""
+                }).execute()
+        except Exception:
+            pass
+
+        # 3) Return the surviving side to its pool as Working (per spec)
+        try:
+            if archive_housing and not archive_electronics and eid:
+                sb.table("inventory_electronics").upsert(
+                    {"electronics_id": eid, "status": "Working", "notes": "Returned from archive"},
+                    on_conflict="electronics_id"
+                ).execute()
+            if archive_electronics and not archive_housing and hid:
+                sb.table("inventory_housing").upsert(
+                    {"housing_id": hid, "status": "Working", "notes": "Returned from archive"},
+                    on_conflict="housing_id"
+                ).execute()
+        except Exception:
+            pass
+
+        # 4) Deactivate the device row so it disappears from Overview/My FEDs
+        sb.table("devices").update({"is_active": False}).eq("id", rid).execute()
+
+        # 5) History/logs
+        try:
+            pieces = []
+            if archive_housing: pieces.append("housing")
+            if archive_electronics: pieces.append("electronics")
+            log_action(
+                actor, "archive",
+                housing_id=hid, electronics_id=eid,
+                details=f"archived={' & '.join(pieces)}; note={note or ''}"
+            )
+        except Exception:
+            pass
 
 
 
@@ -310,6 +376,12 @@ with tab_overview:
                   "current_location","exp_start_date","notes","in_use","housing_id","electronics_id"]:
             if c not in df.columns:
                 df[c] = pd.Series(dtype="object")
+                # Only show active, “assembled” devices (both IDs present)
+            if "is_active" not in df.columns:
+                df["is_active"] = True
+            df = df[(df["is_active"] == True)]
+            df = df[(df["housing_id"].notna()) & (df["electronics_id"].notna())]
+
 
         # Filters
         c1, c2, c3, c4, c5 = st.columns([1,1,1,1,2])
@@ -571,7 +643,36 @@ with st.expander("Archive selected"):
                 else:
                     st.info("Nothing archived (missing IDs?).")
 
+        
 
+
+        st.write("---")
+        st.markdown("**Archive selected**")
+        
+        cA, cB, cC = st.columns(3)
+        arch_mode = cA.selectbox(
+            "What to archive?",
+            ["(nothing)", "Housing only", "Electronics only", "Both"],
+            index=0,
+            key="ov_arch_mode"
+        )
+        arch_note = cB.text_input("Archive note (optional)", key="ov_arch_note")
+        
+        if cC.button("Archive now", key="ov_arch_btn"):
+            ids = [rid for rid, row in edited.iterrows() if bool(row.get("select"))]
+            if not ids:
+                st.warning("Select at least one row first.")
+            else:
+                picked = get_table_df("devices")
+                picked = picked[picked["id"].isin(ids)].to_dict(orient="records")
+                ah = (arch_mode == "Housing only") or (arch_mode == "Both")
+                ae = (arch_mode == "Electronics only") or (arch_mode == "Both")
+                if not (ah or ae):
+                    st.info("Archive mode is '(nothing)'.")
+                else:
+                    archive_selected_devices(picked, archive_housing=ah, archive_electronics=ae, actor=actor, note=arch_note)
+                    st.success(f"Archived {len(picked)} device(s).")
+                    st.rerun()
 
 
 # -------------------------------
@@ -797,6 +898,37 @@ with tab_mine:
                         st.success(f"Submitted maintenance for {updated} device(s).")
                         st.rerun()
 
+            st.write("---")
+            st.markdown("**Archive selected (My FEDs)**")
+            
+            m1, m2, m3 = st.columns(3)
+            arch_mode_m = m1.selectbox(
+                "What to archive?",
+                ["(nothing)", "Housing only", "Electronics only", "Both"],
+                index=0,
+                key="mine_arch_mode"
+            )
+            arch_note_m = m2.text_input("Archive note (optional)", key="mine_arch_note")
+            
+            if m3.button("Archive selected", key="mine_arch_btn"):
+                ids = [rid for rid, row in edited_mine.iterrows() if bool(row.get("select"))]
+                if not ids:
+                    st.warning("Select at least one row above.")
+                else:
+                    picked = mine[mine["id"].isin(ids)].to_dict(orient="records")
+                    ah = (arch_mode_m == "Housing only") or (arch_mode_m == "Both")
+                    ae = (arch_mode_m == "Electronics only") or (arch_mode_m == "Both")
+                    if not (ah or ae):
+                        st.info("Archive mode is '(nothing)'.")
+                    else:
+                        archive_selected_devices(picked, archive_housing=ah, archive_electronics=ae, actor=actor, note=arch_note_m)
+                        st.success(f"Archived {len(picked)} device(s).")
+                        st.rerun()
+            
+            
+
+
+            
             # ---- Quick history peek for a selected single row
             with st.expander("View history for one of your devices"):
                 # pick from your devices
