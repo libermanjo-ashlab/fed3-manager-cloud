@@ -1003,112 +1003,71 @@ with tab_mine:
 # -------------------------------
 # Add Device
 # -------------------------------
+# -------------------------------
+# Add Device
+# -------------------------------
 with tab_add:
     st.subheader("Add a device")
+    c1, c2 = st.columns(2)
+    with c1:
+        housing_id = st.text_input("Housing ID (e.g., H36)")
+        housing_status = st.selectbox("Housing status", ["Working","Broken","Unknown"], index=0)
+        current_location = st.text_input("Location")
+        notes = st.text_input("Notes")
+    with c2:
+        electronics_id = st.text_input("Electronics ID (e.g., E36)")
+        electronics_status = st.selectbox("Electronics status", ["Working","Broken","Unknown"], index=0)
+        user_val = st.selectbox("User", USERS, index=USERS.index("Unassigned"))
+        in_use = st.checkbox("In use", value=False)
+        exp_start = st.date_input("Experiment start (optional)", value=None)
 
-    # -----------------------------------------
-    # 1) COMBINE EXISTING INVENTORY PARTS
-    # -----------------------------------------
-    st.markdown("### Combine existing housing + electronics into a FED")
+    if st.button("Create device"):
+        # Convert date picker first
+        exp_iso = None
+        if exp_start:
+            try:
+                exp_iso = pd.to_datetime(exp_start).to_pydatetime().isoformat()
+            except Exception:
+                exp_iso = None
 
-    inv_h = get_table_df("inventory_housing")
-    inv_e = get_table_df("inventory_electronics")
+        rec = {
+            "housing_id": housing_id or None,
+            "electronics_id": electronics_id or None,
+            "housing_status": housing_status if housing_status != "Unknown" else None,
+            "electronics_status": electronics_status if electronics_status != "Unknown" else None,
+            "current_location": current_location or None,
+            "notes": notes or None,
+            "user": normalize_user_val(user_val),
+            "in_use": bool(in_use),
+            "exp_start_date": exp_iso,
+        }
 
-    # Ensure expected columns exist
-    if not inv_h.empty:
-        for c in ["housing_id", "status", "notes"]:
-            if c not in inv_h.columns:
-                inv_h[c] = None
-    if not inv_e.empty:
-        for c in ["electronics_id", "status", "notes"]:
-            if c not in inv_e.columns:
-                inv_e[c] = None
+        # Normalize IDs / status and compute status_bucket
+        rec = normalize_device(rec)
 
-    # Only allow Working parts to be combined
-    working_h = inv_h[inv_h["status"] == "Working"] if (not inv_h.empty and "status" in inv_h.columns) else inv_h
-    working_e = inv_e[inv_e["status"] == "Working"] if (not inv_e.empty and "status" in inv_e.columns) else inv_e
+        # Make absolutely sure we never send an id to Supabase here
+        rec.pop("id", None)
 
-    opts_h = [""] + sorted(working_h["housing_id"].dropna().unique().tolist()) if (not working_h.empty and "housing_id" in working_h.columns) else [""]
-    opts_e = [""] + sorted(working_e["electronics_id"].dropna().unique().tolist()) if (not working_e.empty and "electronics_id" in working_e.columns) else [""]
+        try:
+            if rec["housing_id"]:
+                sb.table("devices").upsert(rec, on_conflict="housing_id").execute()
+            elif rec["electronics_id"]:
+                sb.table("devices").upsert(rec, on_conflict="electronics_id").execute()
+            else:
+                st.warning("Provide at least one of housing_id or electronics_id.")
+                st.stop()
 
-    if len(opts_h) == 1 and len(opts_e) == 1:
-        st.caption("No *Working* housings or electronics in inventory yet. Create some below in **New device**.")
-    else:
-        with st.form("combine_fed_form"):
-            c1, c2 = st.columns(2)
-            with c1:
-                housing_sel = st.selectbox("Housing ID (Working inventory)", opts_h)
-                current_location = st.text_input("Location")
-                notes_extra = st.text_input("Additional notes")
-            with c2:
-                electronics_sel = st.selectbox("Electronics ID (Working inventory)", opts_e)
-                user_val = st.selectbox("User", USERS, index=USERS.index("Unassigned"))
-                in_use = st.checkbox("In use", value=False)
-                exp_start = st.date_input("Experiment start (optional)", value=None)
-
-            submitted = st.form_submit_button("Create FED from selected parts")
-            if submitted:
-                if not housing_sel or not electronics_sel:
-                    st.warning("Select both a housing ID and an electronics ID.")
-                else:
-                    # Get corresponding inventory rows
-                    h_row = None
-                    e_row = None
-                    if not working_h.empty:
-                        tmp = working_h[working_h["housing_id"] == housing_sel]
-                        if not tmp.empty:
-                            h_row = tmp.iloc[0]
-                    if not working_e.empty:
-                        tmp = working_e[working_e["electronics_id"] == electronics_sel]
-                        if not tmp.empty:
-                            e_row = tmp.iloc[0]
-
-                    # Convert exp_start to ISO string
-                    exp_iso = None
-                    if exp_start:
-                        try:
-                            exp_iso = pd.to_datetime(exp_start).to_pydatetime().isoformat()
-                        except Exception:
-                            exp_iso = None
-
-                    # Combine notes: housing notes + electronics notes + extra
-                    h_notes = (h_row["notes"] if (h_row is not None and "notes" in h_row) else "") or ""
-                    e_notes = (e_row["notes"] if (e_row is not None and "notes" in e_row) else "") or ""
-                    pieces = [x for x in [h_notes, e_notes, notes_extra] if x]
-                    combined_notes = " | ".join(pieces) if pieces else None
-
-                    rec = {
-                        "housing_id": housing_sel,
-                        "electronics_id": electronics_sel,
-                        "housing_status": (h_row["status"] if (h_row is not None and "status" in h_row) else None),
-                        "electronics_status": (e_row["status"] if (e_row is not None and "status" in e_row) else None),
-                        "current_location": current_location or None,
-                        "notes": combined_notes,
-                        "user": normalize_user_val(user_val),
-                        "in_use": bool(in_use),
-                        "exp_start_date": exp_iso,
-                    }
-
-                    rec = normalize_device(rec)
-
-                    try:
-                        # Use housing_id as primary conflict target (you can change to electronics_id if you prefer)
-                        if rec["housing_id"]:
-                            sb.table("devices").upsert(rec, on_conflict="housing_id").execute()
-                        else:
-                            sb.table("devices").upsert(rec, on_conflict="electronics_id").execute()
-
-                        log_action(
-                            actor, "create_device_from_inventory",
-                            rec.get("housing_id"), rec.get("electronics_id"),
-                            details=f"status={rec['status_bucket']}"
-                        )
-                        st.success("FED created from inventory parts.")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Could not create device: {e}")
-
-    st.write("---")
+            log_action(
+                actor, "create_device",
+                rec.get("housing_id"), rec.get("electronics_id"),
+                details=f"status={rec['status_bucket']}"
+            )
+            st.success("Device created.")
+            st.rerun()
+        except APIError as e:
+            # Show the underlying Supabase error message
+            msg = getattr(e, "message", None) or str(e)
+            st.error(f"Could not create device: {msg}")
 
     # -----------------------------------------
     # 2) NEW DEVICE: CREATE NEW IDS INTO INVENTORY
