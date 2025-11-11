@@ -1007,7 +1007,7 @@ with tab_add:
     st.subheader("Add a device")
 
     # --- 1. Optional: register new loose parts into inventory_housing / inventory_electronics ---
-    st.markdown("#### 1. (Optional) Register new parts")
+    st.markdown("#### 1. Add new parts")
 
     col_h, col_e = st.columns(2)
 
