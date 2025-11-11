@@ -1003,26 +1003,162 @@ with tab_mine:
 # -------------------------------
 # Add Device
 # -------------------------------
-# -------------------------------
-# Add Device
-# -------------------------------
 with tab_add:
     st.subheader("Add a device")
-    c1, c2 = st.columns(2)
-    with c1:
-        housing_id = st.text_input("Housing ID (e.g., H36)")
-        housing_status = st.selectbox("Housing status", ["Working","Broken","Unknown"], index=0)
-        current_location = st.text_input("Location")
-        notes = st.text_input("Notes")
-    with c2:
-        electronics_id = st.text_input("Electronics ID (e.g., E36)")
-        electronics_status = st.selectbox("Electronics status", ["Working","Broken","Unknown"], index=0)
-        user_val = st.selectbox("User", USERS, index=USERS.index("Unassigned"))
-        in_use = st.checkbox("In use", value=False)
-        exp_start = st.date_input("Experiment start (optional)", value=None)
 
-    if st.button("Create device"):
-        # Convert date picker first
+    # --- 1. Optional: register new loose parts into inventory_housing / inventory_electronics ---
+    st.markdown("#### 1. (Optional) Register new parts")
+
+    col_h, col_e = st.columns(2)
+
+    # New housing shell
+    with col_h:
+        st.caption("New housing shell")
+        new_h_id = st.text_input("New housing ID", key="new_h_id")
+        new_h_status = st.selectbox(
+            "Housing status",
+            ["Working", "Broken", "Unknown"],
+            index=0,
+            key="new_h_status",
+        )
+        new_h_notes = st.text_input("Housing notes", key="new_h_notes")
+
+        if st.button("Save housing part", key="btn_save_housing_part"):
+            if not new_h_id.strip():
+                st.warning("Enter a housing ID.")
+            else:
+                try:
+                    sb.table("inventory_housing").insert({
+                        "housing_id": new_h_id.strip().upper(),
+                        "status": None if new_h_status == "Unknown" else new_h_status,
+                        "notes": new_h_notes or None,
+                    }).execute()
+                    st.success("Housing part saved to inventory.")
+                except APIError as e:
+                    st.error(f"Could not save housing part: {getattr(e, 'message', e)}")
+
+    # New electronics board
+    with col_e:
+        st.caption("New electronics board")
+        new_e_id = st.text_input("New electronics ID", key="new_e_id")
+        new_e_status = st.selectbox(
+            "Electronics status",
+            ["Working", "Broken", "Unknown"],
+            index=0,
+            key="new_e_status",
+        )
+        new_e_notes = st.text_input("Electronics notes", key="new_e_notes")
+
+        if st.button("Save electronics part", key="btn_save_electronics_part"):
+            if not new_e_id.strip():
+                st.warning("Enter an electronics ID.")
+            else:
+                try:
+                    sb.table("inventory_electronics").insert({
+                        "electronics_id": new_e_id.strip().upper(),
+                        "status": None if new_e_status == "Unknown" else new_e_status,
+                        "notes": new_e_notes or None,
+                    }).execute()
+                    st.success("Electronics part saved to inventory.")
+                except APIError as e:
+                    st.error(f"Could not save electronics part: {getattr(e, 'message', e)}")
+
+    st.write("---")
+    st.markdown("#### 2. Assemble device")
+
+    # Try to pull working parts from inventory tables (if those tables exist)
+    try:
+        inv_h_df = get_table_df("inventory_housing")
+    except APIError:
+        inv_h_df = pd.DataFrame()
+
+    try:
+        inv_e_df = get_table_df("inventory_electronics")
+    except APIError:
+        inv_e_df = pd.DataFrame()
+
+    working_h_ids = []
+    if not inv_h_df.empty and "housing_id" in inv_h_df.columns:
+        status_h = inv_h_df.get("status")
+        if status_h is not None:
+            mask = status_h.fillna("Working") == "Working"
+            working_h_ids = sorted(inv_h_df[mask]["housing_id"].dropna().unique().tolist())
+
+    working_e_ids = []
+    if not inv_e_df.empty and "electronics_id" in inv_e_df.columns:
+        status_e = inv_e_df.get("status")
+        if status_e is not None:
+            mask = status_e.fillna("Working") == "Working"
+            working_e_ids = sorted(inv_e_df[mask]["electronics_id"].dropna().unique().tolist())
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        use_existing_h = st.checkbox(
+            "Choose housing from inventory",
+            value=bool(working_h_ids),
+            key="use_existing_h",
+        )
+        if use_existing_h and working_h_ids:
+            housing_id = st.selectbox(
+                "Housing ID",
+                working_h_ids,
+                key="housing_id_select",
+            )
+        else:
+            housing_id = st.text_input(
+                "Housing ID (manual)",
+                key="housing_id_manual",
+            )
+
+        housing_status = st.selectbox(
+            "Housing status",
+            ["Working", "Broken", "Unknown"],
+            index=0,
+            key="housing_status_main",
+        )
+        current_location = st.text_input("Location", key="device_location")
+        notes = st.text_input("Notes", key="device_notes")
+
+    with c2:
+        use_existing_e = st.checkbox(
+            "Choose electronics from inventory",
+            value=bool(working_e_ids),
+            key="use_existing_e",
+        )
+        if use_existing_e and working_e_ids:
+            electronics_id = st.selectbox(
+                "Electronics ID",
+                working_e_ids,
+                key="electronics_id_select",
+            )
+        else:
+            electronics_id = st.text_input(
+                "Electronics ID (manual)",
+                key="electronics_id_manual",
+            )
+
+        electronics_status = st.selectbox(
+            "Electronics status",
+            ["Working", "Broken", "Unknown"],
+            index=0,
+            key="electronics_status_main",
+        )
+        user_val = st.selectbox(
+            "User",
+            USERS,
+            index=USERS.index("Unassigned"),
+            key="device_user",
+        )
+        in_use = st.checkbox("In use", value=False, key="device_in_use")
+        exp_start = st.date_input(
+            "Experiment start (optional)",
+            value=None,
+            key="device_exp_start",
+        )
+
+    if st.button("Create device", key="btn_create_device"):
+        # Convert date to ISO
         exp_iso = None
         if exp_start:
             try:
@@ -1031,8 +1167,8 @@ with tab_add:
                 exp_iso = None
 
         rec = {
-            "housing_id": housing_id or None,
-            "electronics_id": electronics_id or None,
+            "housing_id": (housing_id or "").strip().upper() or None,
+            "electronics_id": (electronics_id or "").strip().upper() or None,
             "housing_status": housing_status if housing_status != "Unknown" else None,
             "electronics_status": electronics_status if electronics_status != "Unknown" else None,
             "current_location": current_location or None,
@@ -1044,81 +1180,35 @@ with tab_add:
 
         # Normalize IDs / status and compute status_bucket
         rec = normalize_device(rec)
-
         # Make absolutely sure we never send an id to Supabase here
         rec.pop("id", None)
 
-        try:
-            if rec["housing_id"]:
-                sb.table("devices").upsert(rec, on_conflict="housing_id").execute()
-            elif rec["electronics_id"]:
-                sb.table("devices").upsert(rec, on_conflict="electronics_id").execute()
-            else:
-                st.warning("Provide at least one of housing_id or electronics_id.")
-                st.stop()
-
-            log_action(
-                actor, "create_device",
-                rec.get("housing_id"), rec.get("electronics_id"),
-                details=f"status={rec['status_bucket']}"
-            )
-            st.success("Device created.")
-            st.rerun()
-        except APIError as e:
-            # Show the underlying Supabase error message
-            msg = getattr(e, "message", None) or str(e)
-            st.error(f"Could not create device: {msg}")
-
-    # -----------------------------------------
-    # 2) NEW DEVICE: CREATE NEW IDS INTO INVENTORY
-    # -----------------------------------------
-    st.markdown("### New device (create new housing/electronics IDs)")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        new_hid = st.text_input("New housing ID (e.g., H50)", key="new_hid")
-        new_h_status = st.selectbox("Housing status", ["Working","Broken","Unknown"], index=0, key="new_h_status")
-        new_h_notes = st.text_input("Housing notes", key="new_h_notes")
-    with c2:
-        new_eid = st.text_input("New electronics ID (e.g., E50)", key="new_eid")
-        new_e_status = st.selectbox("Electronics status", ["Working","Broken","Unknown"], index=0, key="new_e_status")
-        new_e_notes = st.text_input("Electronics notes", key="new_e_notes")
-
-    if st.button("Save new IDs to inventory", key="new_ids_btn"):
-        if not new_hid and not new_eid:
-            st.warning("Enter at least a housing ID or an electronics ID.")
+        if not rec["housing_id"] and not rec["electronics_id"]:
+            st.warning("Provide at least one of housing_id or electronics_id.")
         else:
             try:
-                # New housing → inventory_housing
-                if new_hid:
-                    hid = clean_id(new_hid)
-                    h_status = None if new_h_status == "Unknown" else new_h_status
-                    sb.table("inventory_housing").upsert(
-                        {
-                            "housing_id": hid,
-                            "status": h_status,
-                            "notes": new_h_notes or None,
-                        },
-                        on_conflict="housing_id",
-                    ).execute()
+                # Upsert by housing_id or electronics_id
+                if rec["housing_id"]:
+                    sb.table("devices").upsert(rec, on_conflict="housing_id").execute()
+                elif rec["electronics_id"]:
+                    sb.table("devices").upsert(rec, on_conflict="electronics_id").execute()
 
-                # New electronics → inventory_electronics
-                if new_eid:
-                    eid = clean_id(new_eid)
-                    e_status = None if new_e_status == "Unknown" else new_e_status
-                    sb.table("inventory_electronics").upsert(
-                        {
-                            "electronics_id": eid,
-                            "status": e_status,
-                            "notes": new_e_notes or None,
-                        },
-                        on_conflict="electronics_id",
-                    ).execute()
+                # If we used inventory parts, remove them from the pool
+                if use_existing_h and rec["housing_id"] and not inv_h_df.empty:
+                    sb.table("inventory_housing").delete().eq("housing_id", rec["housing_id"]).execute()
+                if use_existing_e and rec["electronics_id"] and not inv_e_df.empty:
+                    sb.table("inventory_electronics").delete().eq("electronics_id", rec["electronics_id"]).execute()
 
-                st.success("New IDs saved to inventory. You can now combine them into a FED in the section above.")
+                log_action(
+                    actor, "create_device",
+                    rec.get("housing_id"), rec.get("electronics_id"),
+                    details=f"status={rec['status_bucket']}",
+                )
+                st.success("Device created.")
                 st.rerun()
-            except Exception as e:
-                st.error(f"Could not save to inventory: {e}")
+            except APIError as e:
+                msg = getattr(e, "message", None) or str(e)
+                st.error(f"Could not create device: {msg}")
 
 # -------------------------------
 # History
